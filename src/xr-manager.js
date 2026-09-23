@@ -10,7 +10,46 @@ import { Text } from 'troika-three-text';
 import * as TWEEN from '@tweenjs/tween.js';
 import { setNodeHoverState } from './nodes.js';
 import { soundFx } from './audio.js';
-import { portfolioState, adjustAssetAllocation } from './data.js';
+import { portfolioState, adjustAssetAllocation, INDIAN_STOCKS, formatCurrency } from './data.js';
+import { setChartResolutionPreset } from './charts.js';
+
+/**
+ * Curated active stock directory for live type-ahead auto-filtering in VR
+ * Includes US Equities, Index Funds, Crypto, Bonds & Top Indian Equities (NSE/BSE)
+ */
+export const STOCK_CATALOG = [
+  { symbol: 'NVDA', name: 'NVIDIA Corp', price: 128.50, currency: 'USD', sector: 'Equities' },
+  { symbol: 'AAPL', name: 'Apple Inc', price: 224.20, currency: 'USD', sector: 'Equities' },
+  { symbol: 'MSFT', name: 'Microsoft Corp', price: 448.90, currency: 'USD', sector: 'Equities' },
+  { symbol: 'AMZN', name: 'Amazon.com Inc', price: 186.40, currency: 'USD', sector: 'Equities' },
+  { symbol: 'GOOGL', name: 'Alphabet Inc', price: 179.30, currency: 'USD', sector: 'Equities' },
+  { symbol: 'TSLA', name: 'Tesla Inc', price: 210.10, currency: 'USD', sector: 'Equities' },
+  { symbol: 'IVV', name: 'S&P 500 Index Fund', price: 545.20, currency: 'USD', sector: 'Index' },
+  { symbol: 'BTC', name: 'Bitcoin (USD)', price: 63400, currency: 'USD', sector: 'Crypto' },
+  { symbol: 'ETH', name: 'Ethereum (USD)', price: 2720, currency: 'USD', sector: 'Crypto' },
+  { symbol: 'BND', name: 'Total Bond Market', price: 72.10, currency: 'USD', sector: 'Bonds' },
+  ...INDIAN_STOCKS
+];
+
+export const interactiveObjects = [];
+
+export function registerInteractiveObject(obj, onClickCallback) {
+  if (!obj) return;
+  obj.userData = obj.userData || {};
+  if (onClickCallback) {
+    obj.userData.onClick = onClickCallback;
+  }
+  obj.userData.isInteractive = true;
+  obj.userData.isVRButton = true;
+  if (!interactiveObjects.includes(obj)) {
+    interactiveObjects.push(obj);
+  }
+}
+
+export function unregisterInteractiveObject(obj) {
+  const idx = interactiveObjects.indexOf(obj);
+  if (idx !== -1) interactiveObjects.splice(idx, 1);
+}
 
 export class XRManager {
   constructor(renderer, scene, camera, callbacks = {}) {
@@ -55,36 +94,29 @@ export class XRManager {
     this.dataPanelTexts = {};
     this.assetRowElements = [];
 
+    // 3D Spatial Quick Tickers Slate
+    this.quickTickersSlate = null;
+    this.quickTickerButtons = [];
+
+    // 3D Spatial Instant Search Panel & Virtual Keyboard
+    this.searchPanel = null;
+    this.searchPanelButtons = [];
+    this.searchSuggestionButtons = [];
+    this.searchQuery = '';
+    this.searchQueryText = null;
+    this.suggestionsContainer = null;
+    this.cursorVisible = true;
+    this.cursorTimer = 0;
+
     this.initXR();
   }
 
   /**
-   * Smoothly glides the VR User Rig to frame the target planet comfortably (3.5m offset).
+   * Safe no-op to prevent VR motion sickness (camera/rig stays stable in user's chosen viewing space).
    */
   flyToTarget(targetMesh) {
-    if (!targetMesh || !this.userRig) return;
-    const targetWorldPos = new THREE.Vector3();
-    targetMesh.getWorldPosition(targetWorldPos);
-
-    // Calculate a comfortable viewing offset: 3.5m back along the viewing axis, elevated 0.8m
-    const sunPos = new THREE.Vector3(0, 0, 0);
-    const viewOffset = targetWorldPos.clone().sub(sunPos);
-    if (viewOffset.lengthSq() < 0.001) {
-      viewOffset.set(0, 0, 1);
-    }
-    viewOffset.normalize().multiplyScalar(3.5);
-    viewOffset.y += 0.8;
-    const targetRigPos = targetWorldPos.clone().add(viewOffset);
-
-    if (this.currentRigTween) {
-      this.currentRigTween.stop();
-    }
-
-    this.currentRigTween = new TWEEN.Tween(this.userRig.position)
-      .to({ x: targetRigPos.x, y: targetRigPos.y, z: targetRigPos.z }, 1200)
-      .easing(TWEEN.Easing.Cubic.Out);
-    TWEEN.add(this.currentRigTween);
-    this.currentRigTween.start();
+    // Intentionally no-op: chart is summoned into personal space rather than moving the user
+    return;
   }
 
   /**
@@ -146,6 +178,12 @@ export class XRManager {
       }
       if (this.spatialDataPanel) {
         this.spatialDataPanel.visible = false;
+      }
+      if (this.quickTickersSlate) {
+        this.quickTickersSlate.visible = false;
+      }
+      if (this.searchPanel) {
+        this.searchPanel.visible = false;
       }
       if (this.hoveredObject) {
         setNodeHoverState(this.hoveredObject, false);
@@ -228,6 +266,12 @@ export class XRManager {
 
     // 6. Build 3D Spatial Manage Data Slate Panel
     this.buildSpatialDataPanel();
+
+    // 7. Build 3D Quick Tickers & Live Stocks Slate
+    this.buildQuickTickersSlate();
+
+    // 8. Build 3D Spatial Search Window & Virtual Keyboard
+    this.buildSpatialSearchPanel();
   }
 
   createLaserPointer(colorHex = 0x00f0ff) {
@@ -573,14 +617,14 @@ export class XRManager {
     });
     this.dockTexts.btnReset = btnReset.txt;
 
-    // 4. Row 2: Chart & Data Tools (y = +0.005m | 3 buttons, width 0.076m each)
+    // 4. Row 2: Chart, Ticker Search & Data Tools (y = +0.005m | 4 buttons, width 0.056m each)
     const btnChartMode = createPillButton({
-      label: '📈 Spline / 📊 Candles',
-      x: -0.082,
+      label: '📈/📊 Mode',
+      x: -0.087,
       y: 0.005,
-      w: 0.076,
+      w: 0.056,
       h: 0.019,
-      fontSize: 0.0058,
+      fontSize: 0.0052,
       color: 0x0e7490,
       hoverColor: 0x06b6d4,
       emissiveColor: 0x06b6d4,
@@ -591,25 +635,41 @@ export class XRManager {
     this.dockButtons.btnChartMode = btnChartMode.btnMesh;
 
     const btnToggleChart = createPillButton({
-      label: '📊 Toggle Chart',
-      x: 0,
+      label: '📊 Chart',
+      x: -0.029,
       y: 0.005,
-      w: 0.076,
+      w: 0.056,
       h: 0.019,
-      fontSize: 0.0060,
+      fontSize: 0.0056,
       color: 0x1e293b,
       hoverColor: 0x334155,
       action: 'toggleChart'
     });
     this.dockTexts.btnToggleChart = btnToggleChart.txt;
 
-    const btnManageData = createPillButton({
-      label: '📑 Manage Data',
-      x: 0.082,
+    const btnQuickTickers = createPillButton({
+      label: '🔍 Search',
+      x: 0.029,
       y: 0.005,
-      w: 0.076,
+      w: 0.056,
       h: 0.019,
-      fontSize: 0.0060,
+      fontSize: 0.0056,
+      color: 0x0f766e,
+      hoverColor: 0x14b8a6,
+      emissiveColor: 0x10b981,
+      emissiveIntensity: 0.4,
+      action: 'toggleSearchPanel'
+    });
+    this.dockTexts.btnQuickTickers = btnQuickTickers.txt;
+    this.dockButtons.btnQuickTickers = btnQuickTickers.btnMesh;
+
+    const btnManageData = createPillButton({
+      label: '📑 Data',
+      x: 0.087,
+      y: 0.005,
+      w: 0.056,
+      h: 0.019,
+      fontSize: 0.0056,
       color: 0x1e293b,
       hoverColor: 0x334155,
       action: 'toggleManageData'
@@ -1296,6 +1356,894 @@ export class XRManager {
   }
 
   /**
+   * Builds the 3D Holographic Quick Tickers & Live Stocks Spatial Slate.
+   * Floating frosted glass slate displaying popular tickers: NVDA, AAPL, MSFT, TSLA, BTC, ETH, AMZN, SPY.
+   */
+  buildQuickTickersSlate() {
+    this.quickTickersSlate = new THREE.Group();
+    this.quickTickersSlate.name = 'QuickTickersSpatialSlate';
+    this.quickTickersSlate.position.set(0, 1.6, 10.8);
+    this.quickTickersSlate.visible = false;
+    this.quickTickerButtons = [];
+
+    const slateW = 0.72;
+    const slateH = 0.44;
+    const slateR = 0.016;
+
+    // 1. Frosted Cyber Glass Backing Plate
+    const plateShape = this.createRoundedRectShape(slateW, slateH, slateR);
+    const plateGeo = new THREE.ShapeGeometry(plateShape, 24);
+    const plateMat = new THREE.MeshPhysicalMaterial({
+      color: 0x050c18,
+      transmission: 0.90,
+      roughness: 0.18,
+      metalness: 0.15,
+      ior: 1.45,
+      transparent: true,
+      opacity: 0.90,
+      clearcoat: 0.35,
+      side: THREE.DoubleSide
+    });
+    const plateMesh = new THREE.Mesh(plateGeo, plateMat);
+    this.quickTickersSlate.add(plateMesh);
+
+    // Glowing Neon Cyan Border
+    const borderPoints = plateShape.getPoints(32);
+    const borderGeo = new THREE.BufferGeometry().setFromPoints(borderPoints);
+    const borderMat = new THREE.LineBasicMaterial({
+      color: 0x00f0ff,
+      transparent: true,
+      opacity: 0.75,
+      blending: THREE.AdditiveBlending
+    });
+    const borderLine = new THREE.LineLoop(borderGeo, borderMat);
+    borderLine.position.z = 0.001;
+    this.quickTickersSlate.add(borderLine);
+
+    // 2. Header Bar
+    const titleText = new Text();
+    titleText.text = '🔍 REAL-TIME STOCKS & QUICK TICKERS';
+    titleText.fontSize = 0.0155;
+    titleText.color = 0x00f0ff;
+    titleText.anchorX = 'left';
+    titleText.anchorY = 'middle';
+    titleText.position.set(-slateW / 2 + 0.035, slateH / 2 - 0.035, 0.003);
+    titleText.sync();
+    this.quickTickersSlate.add(titleText);
+
+    const subText = new Text();
+    subText.text = 'Tap any symbol to fetch Finnhub live candle data & stream real-time ticks into the 3D chart';
+    subText.fontSize = 0.0085;
+    subText.color = 0x94a3b8;
+    subText.anchorX = 'left';
+    subText.anchorY = 'middle';
+    subText.position.set(-slateW / 2 + 0.035, slateH / 2 - 0.062, 0.003);
+    subText.sync();
+    this.quickTickersSlate.add(subText);
+
+    // Close Button [✕]
+    const closeShape = this.createRoundedRectShape(0.040, 0.030, 0.005);
+    const closeGeo = new THREE.ShapeGeometry(closeShape, 12);
+    const closeMat = new THREE.MeshStandardMaterial({
+      color: 0x1e293b,
+      roughness: 0.35,
+      metalness: 0.2,
+      emissive: new THREE.Color(0xef4444),
+      emissiveIntensity: 0.25,
+      transparent: true,
+      opacity: 0.85,
+      side: THREE.DoubleSide
+    });
+    const closeBtnMesh = new THREE.Mesh(closeGeo, closeMat);
+    closeBtnMesh.position.set(slateW / 2 - 0.035, slateH / 2 - 0.035, 0.003);
+    closeBtnMesh.userData = {
+      isVRButton: true,
+      action: 'closeQuickTickersSlate',
+      baseColor: 0x1e293b,
+      hoverColor: 0xef4444,
+      baseEmissiveIntensity: 0.25
+    };
+    this.quickTickersSlate.add(closeBtnMesh);
+    this.quickTickerButtons.push(closeBtnMesh);
+
+    const closeTxt = new Text();
+    closeTxt.text = '✕';
+    closeTxt.fontSize = 0.014;
+    closeTxt.color = 0xf8fafc;
+    closeTxt.anchorX = 'center';
+    closeTxt.anchorY = 'middle';
+    closeTxt.position.set(slateW / 2 - 0.035, slateH / 2 - 0.035, 0.005);
+    closeTxt.sync();
+    this.quickTickersSlate.add(closeTxt);
+
+    // Divider Line
+    const divGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(-slateW / 2 + 0.03, slateH / 2 - 0.082, 0.002),
+      new THREE.Vector3(slateW / 2 - 0.03, slateH / 2 - 0.082, 0.002)
+    ]);
+    const divMat = new THREE.LineBasicMaterial({ color: 0x334155, transparent: true, opacity: 0.6 });
+    this.quickTickersSlate.add(new THREE.Line(divGeo, divMat));
+
+    // 3. Quick Tickers Grid (2 rows x 4 columns)
+    const tickers = [
+      { symbol: 'NVDA', name: 'Nvidia Corp', price: '$128.50', ret: '+48.2%', col: 0x00f0ff, cat: 'GPU AI' },
+      { symbol: 'AAPL', name: 'Apple Inc.', price: '$232.10', ret: '+18.4%', col: 0x38bdf8, cat: 'Ecosystem' },
+      { symbol: 'MSFT', name: 'Microsoft', price: '$448.20', ret: '+24.6%', col: 0x8b5cf6, cat: 'Cloud AI' },
+      { symbol: 'TSLA', name: 'Tesla Inc.', price: '$254.60', ret: '-8.2%', col: 0xef4444, cat: 'Autonomy' },
+      { symbol: 'BTC', name: 'Bitcoin', price: '$64,280', ret: '+62.5%', col: 0xf59e0b, cat: 'Crypto' },
+      { symbol: 'ETH', name: 'Ethereum', price: '$3,490', ret: '+42.0%', col: 0xec4899, cat: 'DeFi Web3' },
+      { symbol: 'AMZN', name: 'Amazon.com', price: '$188.40', ret: '+22.8%', col: 0x10b981, cat: 'Cloud AWS' },
+      { symbol: 'SPY', name: 'S&P 500 ETF', price: '$560.20', ret: '+16.5%', col: 0x06b6d4, cat: 'Index Fund' }
+    ];
+
+    const colCount = 4;
+    const btnW = 0.152;
+    const btnH = 0.115;
+    const startX = -((colCount - 1) * 0.168) / 2;
+    const startY = 0.038;
+    const rowGapY = 0.138;
+
+    tickers.forEach((t, i) => {
+      const colIdx = i % colCount;
+      const rowIdx = Math.floor(i / colCount);
+      const x = startX + colIdx * 0.168;
+      const y = startY - rowIdx * rowGapY;
+
+      const btnGroup = new THREE.Group();
+      btnGroup.position.set(x, y, 0.003);
+
+      const bShape = this.createRoundedRectShape(btnW, btnH, 0.008);
+      const bGeo = new THREE.ShapeGeometry(bShape, 16);
+      const bMat = new THREE.MeshStandardMaterial({
+        color: 0x0f172a,
+        roughness: 0.3,
+        metalness: 0.25,
+        emissive: new THREE.Color(t.col),
+        emissiveIntensity: 0.18,
+        transparent: true,
+        opacity: 0.88,
+        side: THREE.DoubleSide
+      });
+      const bMesh = new THREE.Mesh(bGeo, bMat);
+      bMesh.userData = {
+        isVRButton: true,
+        action: 'selectQuickTicker',
+        symbol: t.symbol,
+        baseColor: 0x0f172a,
+        hoverColor: 0x1e293b,
+        emissiveColor: t.col,
+        baseEmissiveIntensity: 0.18,
+        originalZ: 0.003
+      };
+      btnGroup.add(bMesh);
+      this.quickTickerButtons.push(bMesh);
+
+      // Border outline
+      const bBorderGeo = new THREE.BufferGeometry().setFromPoints(bShape.getPoints(16));
+      const bBorderMat = new THREE.LineBasicMaterial({ color: t.col, transparent: true, opacity: 0.65 });
+      const bBorder = new THREE.LineLoop(bBorderGeo, bBorderMat);
+      bBorder.position.z = 0.001;
+      btnGroup.add(bBorder);
+
+      // Ticker Label
+      const txtSymbol = new Text();
+      txtSymbol.text = t.symbol;
+      txtSymbol.fontSize = 0.016;
+      txtSymbol.color = 0xffffff;
+      txtSymbol.anchorX = 'center';
+      txtSymbol.anchorY = 'middle';
+      txtSymbol.position.set(0, 0.026, 0.003);
+      txtSymbol.sync();
+      btnGroup.add(txtSymbol);
+
+      // Name & Subtitle
+      const txtName = new Text();
+      txtName.text = `${t.name}`;
+      txtName.fontSize = 0.0076;
+      txtName.color = 0x94a3b8;
+      txtName.anchorX = 'center';
+      txtName.anchorY = 'middle';
+      txtName.position.set(0, 0.006, 0.003);
+      txtName.sync();
+      btnGroup.add(txtName);
+
+      // Price & Returns Pill
+      const txtPrice = new Text();
+      txtPrice.text = `${t.price} (${t.ret})`;
+      txtPrice.fontSize = 0.0080;
+      txtPrice.color = t.ret.startsWith('+') ? 0x10b981 : 0xef4444;
+      txtPrice.anchorX = 'center';
+      txtPrice.anchorY = 'middle';
+      txtPrice.position.set(0, -0.016, 0.003);
+      txtPrice.sync();
+      btnGroup.add(txtPrice);
+
+      // Category Tag
+      const txtCat = new Text();
+      txtCat.text = `[ ${t.cat} ]`;
+      txtCat.fontSize = 0.0065;
+      txtCat.color = 0x64748b;
+      txtCat.anchorX = 'center';
+      txtCat.anchorY = 'middle';
+      txtCat.position.set(0, -0.038, 0.003);
+      txtCat.sync();
+      btnGroup.add(txtCat);
+
+      this.quickTickersSlate.add(btnGroup);
+    });
+
+    this.scene.add(this.quickTickersSlate);
+  }
+
+  /**
+   * Toggles the 3D Quick Ticker Grid Spatial Slate in VR space.
+   */
+  toggleQuickTickersSlate(forceState) {
+    if (!this.quickTickersSlate) return;
+
+    const nextVisible = forceState !== undefined ? Boolean(forceState) : !this.quickTickersSlate.visible;
+    this.quickTickersSlate.visible = nextVisible;
+
+    if (nextVisible) {
+      soundFx.playSelectSound();
+
+      // Position 1.2m directly in front of viewer's head orientation
+      const activeCamera = this.renderer.xr.isPresenting ? this.renderer.xr.getCamera() : this.camera;
+      const camPos = new THREE.Vector3();
+      const camQuat = new THREE.Quaternion();
+      activeCamera.getWorldPosition(camPos);
+      activeCamera.getWorldQuaternion(camQuat);
+
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camQuat);
+      const spawnPos = camPos.clone().add(forward.multiplyScalar(1.2));
+      this.quickTickersSlate.position.copy(spawnPos);
+      this.quickTickersSlate.quaternion.copy(camQuat);
+    } else {
+      soundFx.playCloseSound();
+    }
+  }
+
+  /**
+   * Helper to create interactive VR button on the 3D Spatial Search Window.
+   */
+  createSearchButton(config, parentGroup = this.searchPanel) {
+    const {
+      label,
+      char,
+      action,
+      symbol,
+      x,
+      y,
+      w = 0.068,
+      h = 0.034,
+      radius = 0.005,
+      color = 0x1e293b,
+      hoverColor = 0x334155,
+      activeColor = 0x0891b2,
+      emissiveColor = 0x0f172a,
+      emissiveIntensity = 0.2,
+      borderColor = 0x00f0ff,
+      borderOpacity = 0.45,
+      textColor = 0xf8fafc,
+      fontSize = 0.011,
+      data = {}
+    } = config;
+
+    const btnGroup = new THREE.Group();
+    btnGroup.position.set(x, y, 0.003);
+
+    const shape = this.createRoundedRectShape(w, h, radius);
+    const geo = new THREE.ShapeGeometry(shape, 16);
+    const mat = new THREE.MeshStandardMaterial({
+      color,
+      roughness: 0.35,
+      metalness: 0.25,
+      emissive: new THREE.Color(emissiveColor),
+      emissiveIntensity,
+      transparent: true,
+      opacity: 0.90,
+      side: THREE.DoubleSide
+    });
+    const btnMesh = new THREE.Mesh(geo, mat);
+    btnMesh.userData = {
+      isVRButton: true,
+      action,
+      char,
+      symbol,
+      baseColor: color,
+      hoverColor,
+      activeColor,
+      emissiveColor,
+      baseEmissiveIntensity: emissiveIntensity,
+      originalZ: 0.003,
+      w,
+      h,
+      ...data
+    };
+    btnGroup.add(btnMesh);
+    this.searchPanelButtons.push(btnMesh);
+
+    // Glowing Perimeter Outline
+    const borderGeo = new THREE.BufferGeometry().setFromPoints(shape.getPoints(16));
+    const borderMat = new THREE.LineBasicMaterial({
+      color: borderColor,
+      transparent: true,
+      opacity: borderOpacity
+    });
+    const border = new THREE.LineLoop(borderGeo, borderMat);
+    border.position.z = 0.0005;
+    btnGroup.add(border);
+    btnMesh.userData.borderMesh = border;
+
+    // Label Typography
+    const txt = new Text();
+    txt.text = label;
+    txt.fontSize = fontSize;
+    txt.color = textColor;
+    txt.anchorX = 'center';
+    txt.anchorY = 'middle';
+    txt.whiteSpace = 'nowrap';
+    txt.position.set(0, 0, 0.001);
+    txt.sync();
+    btnGroup.add(txt);
+
+    btnMesh.userData.labelMesh = txt;
+    btnMesh.userData.btnGroup = btnGroup;
+    parentGroup.add(btnGroup);
+    return { btnGroup, btnMesh, txt };
+  }
+
+  /**
+   * Builds the 3D Spatial Instant Search Slate with Frosted Glass & Virtual Keyboard.
+   * Dimensions: width: 0.85m, height: 0.65m.
+   * Material: Frosted dark glass (transmission: 0.85, roughness: 0.2, color: #0f172a, glowing border).
+   */
+  buildSpatialSearchPanel() {
+    this.searchPanel = new THREE.Group();
+    this.searchPanel.name = 'SpatialSearchPanel';
+    this.searchPanel.position.set(0, 1.5, 10.9);
+    this.searchPanel.visible = false;
+    this.searchPanelButtons = [];
+
+    const panelW = 0.85;
+    const panelH = 0.65;
+    const panelR = 0.024;
+
+    // 1. Frosted Dark Glass Backing Plate (MeshPhysicalMaterial)
+    const plateShape = this.createRoundedRectShape(panelW, panelH, panelR);
+    const plateGeo = new THREE.ShapeGeometry(plateShape, 32);
+    const plateMat = new THREE.MeshPhysicalMaterial({
+      color: 0x0f172a,
+      transmission: 0.85,
+      roughness: 0.20,
+      metalness: 0.10,
+      ior: 1.45,
+      transparent: true,
+      opacity: 0.88,
+      clearcoat: 0.30,
+      clearcoatRoughness: 0.10,
+      side: THREE.DoubleSide
+    });
+    const plateMesh = new THREE.Mesh(plateGeo, plateMat);
+    this.searchPanel.add(plateMesh);
+
+    // Glowing Cyan Perimeter Frame LineLoop
+    const platePoints = plateShape.getPoints(32);
+    const borderGeo = new THREE.BufferGeometry().setFromPoints(platePoints);
+    const borderMat = new THREE.LineBasicMaterial({
+      color: 0x00f0ff,
+      transparent: true,
+      opacity: 0.75,
+      blending: THREE.AdditiveBlending
+    });
+    const borderLine = new THREE.LineLoop(borderGeo, borderMat);
+    borderLine.position.z = 0.001;
+    this.searchPanel.add(borderLine);
+
+    // Helper to create subtle divider lines
+    const createDivider = (yPos) => {
+      const lineGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(-0.385, yPos, 0.0015),
+        new THREE.Vector3(0.385, yPos, 0.0015)
+      ]);
+      const lineMat = new THREE.LineBasicMaterial({
+        color: 0x334155,
+        transparent: true,
+        opacity: 0.55
+      });
+      this.searchPanel.add(new THREE.Line(lineGeo, lineMat));
+    };
+
+    // 2. Header (y = +0.280m): Brand Title & Red Close Button [ ✕ Close ]
+    const headerTitle = new Text();
+    headerTitle.text = '🔍 REAL-TIME SPATIAL SEARCH & KEYBOARD';
+    headerTitle.fontSize = 0.0145;
+    headerTitle.color = 0x38bdf8;
+    headerTitle.anchorX = 'left';
+    headerTitle.anchorY = 'middle';
+    headerTitle.whiteSpace = 'nowrap';
+    headerTitle.position.set(-0.385, 0.285, 0.003);
+    headerTitle.sync();
+    this.searchPanel.add(headerTitle);
+
+    const headerSub = new Text();
+    headerSub.text = 'LIVE TYPE-AHEAD AUTO-FILTERING • US EQUITIES, INDEX FUNDS & CRYPTO';
+    headerSub.fontSize = 0.0072;
+    headerSub.color = 0x64748b;
+    headerSub.anchorX = 'left';
+    headerSub.anchorY = 'middle';
+    headerSub.whiteSpace = 'nowrap';
+    headerSub.position.set(-0.385, 0.268, 0.003);
+    headerSub.sync();
+    this.searchPanel.add(headerSub);
+
+    // Close Button [ ✕ Close ]
+    this.createSearchButton({
+      label: '✕ Close',
+      x: 0.345,
+      y: 0.278,
+      w: 0.075,
+      h: 0.024,
+      fontSize: 0.0085,
+      color: 0x7f1d1d,
+      hoverColor: 0x991b1b,
+      activeColor: 0xdc2626,
+      emissiveColor: 0xef4444,
+      emissiveIntensity: 0.4,
+      action: 'closeSearchPanel'
+    });
+
+    createDivider(0.252);
+
+    // 3. Search Query Display Bar (y = +0.218m)
+    const searchBarShape = this.createRoundedRectShape(0.77, 0.044, 0.008);
+    const searchBarGeo = new THREE.ShapeGeometry(searchBarShape, 16);
+    const searchBarMat = new THREE.MeshStandardMaterial({
+      color: 0x071120,
+      roughness: 0.3,
+      metalness: 0.2,
+      transparent: true,
+      opacity: 0.90
+    });
+    const searchBarMesh = new THREE.Mesh(searchBarGeo, searchBarMat);
+    searchBarMesh.position.set(0, 0.218, 0.002);
+    this.searchPanel.add(searchBarMesh);
+
+    const sbBorderGeo = new THREE.BufferGeometry().setFromPoints(searchBarShape.getPoints(16));
+    const sbBorderMat = new THREE.LineBasicMaterial({
+      color: 0x00f0ff,
+      transparent: true,
+      opacity: 0.50
+    });
+    const sbBorder = new THREE.LineLoop(sbBorderGeo, sbBorderMat);
+    sbBorder.position.set(0, 0.218, 0.0025);
+    this.searchPanel.add(sbBorder);
+
+    // Search Icon & Prefix Label
+    const searchIconText = new Text();
+    searchIconText.text = '🔍 SEARCH:';
+    searchIconText.fontSize = 0.0095;
+    searchIconText.color = 0x38bdf8;
+    searchIconText.anchorX = 'left';
+    searchIconText.anchorY = 'middle';
+    searchIconText.position.set(-0.365, 0.218, 0.0035);
+    searchIconText.sync();
+    this.searchPanel.add(searchIconText);
+
+    // Live Query Display Text with Blinking Cursor
+    this.searchQueryText = new Text();
+    this.searchQueryText.text = 'NV|';
+    this.searchQueryText.fontSize = 0.0125;
+    this.searchQueryText.color = 0xffffff;
+    this.searchQueryText.anchorX = 'left';
+    this.searchQueryText.anchorY = 'middle';
+    this.searchQueryText.whiteSpace = 'nowrap';
+    this.searchQueryText.position.set(-0.255, 0.218, 0.0035);
+    this.searchQueryText.sync();
+    this.searchPanel.add(this.searchQueryText);
+
+    // Search Bar Action Buttons: [ ⌫ Backspace ] & [ ✕ Clear ]
+    this.createSearchButton({
+      label: '⌫ Del',
+      x: 0.258,
+      y: 0.218,
+      w: 0.062,
+      h: 0.028,
+      fontSize: 0.0085,
+      color: 0x1e293b,
+      hoverColor: 0x334155,
+      action: 'keyBackspace'
+    });
+
+    this.createSearchButton({
+      label: '✕ Clear',
+      x: 0.332,
+      y: 0.218,
+      w: 0.062,
+      h: 0.028,
+      fontSize: 0.0085,
+      color: 0x334155,
+      hoverColor: 0xef4444,
+      action: 'keyClear'
+    });
+
+    createDivider(0.180);
+
+    // 4. Instant Search Results Bar / Suggestions (y = +0.130m)
+    const suggestionsHeader = new Text();
+    suggestionsHeader.text = '— LIVE AUTO-FILTERED SUGGESTIONS & TRENDING TICKERS —';
+    suggestionsHeader.fontSize = 0.0068;
+    suggestionsHeader.color = 0x64748b;
+    suggestionsHeader.anchorX = 'center';
+    suggestionsHeader.anchorY = 'middle';
+    suggestionsHeader.position.set(0, 0.165, 0.003);
+    suggestionsHeader.sync();
+    this.searchPanel.add(suggestionsHeader);
+
+    this.suggestionsContainer = new THREE.Group();
+    this.suggestionsContainer.name = 'SearchSuggestionsContainer';
+    this.searchPanel.add(this.suggestionsContainer);
+
+    createDivider(0.082);
+
+    // 5. Full Virtual Keyboard (y = +0.038m down to -0.178m)
+    // Row 1: Numbers (y = +0.040m | 10 keys)
+    const numKeys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
+    const numStartX = -0.342;
+    const numGap = 0.076;
+    numKeys.forEach((key, idx) => {
+      this.createSearchButton({
+        label: key,
+        char: key,
+        x: numStartX + idx * numGap,
+        y: 0.040,
+        w: 0.068,
+        h: 0.034,
+        fontSize: 0.0115,
+        color: 0x141f33,
+        hoverColor: 0x0284c7,
+        action: 'keyPress'
+      });
+    });
+
+    // Row 2: QWERTY 1 (y = -0.014m | 10 keys)
+    const row1Keys = ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'];
+    row1Keys.forEach((key, idx) => {
+      this.createSearchButton({
+        label: key,
+        char: key,
+        x: numStartX + idx * numGap,
+        y: -0.014,
+        w: 0.068,
+        h: 0.034,
+        fontSize: 0.0115,
+        color: 0x0f172a,
+        hoverColor: 0x0284c7,
+        action: 'keyPress'
+      });
+    });
+
+    // Row 3: QWERTY 2 (y = -0.068m | 9 keys)
+    const row2Keys = ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'];
+    const row2StartX = -0.336;
+    const row2Gap = 0.084;
+    row2Keys.forEach((key, idx) => {
+      this.createSearchButton({
+        label: key,
+        char: key,
+        x: row2StartX + idx * row2Gap,
+        y: -0.068,
+        w: 0.076,
+        h: 0.034,
+        fontSize: 0.0115,
+        color: 0x0f172a,
+        hoverColor: 0x0284c7,
+        action: 'keyPress'
+      });
+    });
+
+    // Row 4: QWERTY 3 + Backspace (y = -0.122m | 7 keys + Backspace)
+    const row3Keys = ['Z', 'X', 'C', 'V', 'B', 'N', 'M'];
+    row3Keys.forEach((key, idx) => {
+      this.createSearchButton({
+        label: key,
+        char: key,
+        x: row2StartX + idx * row2Gap,
+        y: -0.122,
+        w: 0.076,
+        h: 0.034,
+        fontSize: 0.0115,
+        color: 0x0f172a,
+        hoverColor: 0x0284c7,
+        action: 'keyPress'
+      });
+    });
+
+    // [ ⌫ Backspace ] Key on Row 4
+    this.createSearchButton({
+      label: '⌫ Backspace',
+      x: 0.285,
+      y: -0.122,
+      w: 0.134,
+      h: 0.034,
+      fontSize: 0.0090,
+      color: 0x450a0a,
+      hoverColor: 0xef4444,
+      emissiveColor: 0xef4444,
+      emissiveIntensity: 0.25,
+      borderColor: 0xf87171,
+      action: 'keyBackspace'
+    });
+
+    // Row 5: Action Bar (y = -0.176m)
+    this.createSearchButton({
+      label: '✕ Clear',
+      x: -0.278,
+      y: -0.176,
+      w: 0.142,
+      h: 0.034,
+      fontSize: 0.0090,
+      color: 0x334155,
+      hoverColor: 0x475569,
+      action: 'keyClear'
+    });
+
+    this.createSearchButton({
+      label: '⎵  SPACE',
+      char: ' ',
+      x: 0.000,
+      y: -0.176,
+      w: 0.330,
+      h: 0.034,
+      fontSize: 0.0090,
+      color: 0x1e293b,
+      hoverColor: 0x334155,
+      action: 'keyPress'
+    });
+
+    this.createSearchButton({
+      label: '🔍 Search / Enter ⏎',
+      x: 0.258,
+      y: -0.176,
+      w: 0.176,
+      h: 0.034,
+      fontSize: 0.0090,
+      color: 0x0e7490,
+      hoverColor: 0x06b6d4,
+      emissiveColor: 0x06b6d4,
+      emissiveIntensity: 0.35,
+      borderColor: 0x38bdf8,
+      action: 'keySubmit'
+    });
+
+    createDivider(-0.216);
+
+    // 6. Footer Status (y = -0.245m)
+    const footerText = new Text();
+    footerText.text = '⚡ WebXR Direct Touch & 6-DoF Raycasting  •  Instant Bloomberg / TradingView 3D Chart Sync';
+    footerText.fontSize = 0.0075;
+    footerText.color = 0x64748b;
+    footerText.anchorX = 'center';
+    footerText.anchorY = 'middle';
+    footerText.whiteSpace = 'nowrap';
+    footerText.position.set(0, -0.245, 0.003);
+    footerText.sync();
+    this.searchPanel.add(footerText);
+
+    this.scene.add(this.searchPanel);
+
+    // Populate initial default suggestions
+    this.updateSearchQueryDisplay();
+    this.updateSearchSuggestions();
+  }
+
+  /**
+   * Updates Search Query string typography with blinking cursor.
+   */
+  updateSearchQueryDisplay() {
+    if (!this.searchQueryText) return;
+    const cursor = this.cursorVisible ? '|' : ' ';
+    if (this.searchQuery.length > 0) {
+      this.searchQueryText.text = `${this.searchQuery}${cursor}`;
+      this.searchQueryText.color = 0x38bdf8;
+    } else {
+      this.searchQueryText.text = `Type ticker symbol or name... ${cursor}`;
+      this.searchQueryText.color = 0x64748b;
+    }
+    this.searchQueryText.sync();
+  }
+
+  /**
+   * Filters STOCK_CATALOG against search query string.
+   */
+  getFilteredSuggestions() {
+    const q = (this.searchQuery || '').trim().toUpperCase();
+    if (!q) {
+      return STOCK_CATALOG.slice(0, 4);
+    }
+    const matches = STOCK_CATALOG.filter(
+      (s) =>
+        s.symbol.toUpperCase().includes(q) ||
+        s.name.toUpperCase().includes(q) ||
+        (s.sector && s.sector.toUpperCase().includes(q)) ||
+        (s.exchange && s.exchange.toUpperCase().includes(q)) ||
+        (s.currency && s.currency.toUpperCase().includes(q))
+    );
+    return matches.slice(0, 4);
+  }
+
+  /**
+   * Re-renders dynamically matched suggestion chips on the Search Panel.
+   */
+  updateSearchSuggestions() {
+    if (!this.suggestionsContainer) return;
+
+    // Dispose old suggestion children
+    while (this.suggestionsContainer.children.length > 0) {
+      const child = this.suggestionsContainer.children[0];
+      this.suggestionsContainer.remove(child);
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
+        else child.material.dispose();
+      }
+    }
+
+    // Filter out previous suggestion buttons from searchPanelButtons
+    this.searchPanelButtons = this.searchPanelButtons.filter(
+      (b) => b.userData.action !== 'selectSearchSuggestion'
+    );
+    this.searchSuggestionButtons = [];
+
+    const suggestions = this.getFilteredSuggestions();
+
+    if (suggestions.length === 0) {
+      const noMatchShape = this.createRoundedRectShape(0.42, 0.038, 0.006);
+      const noMatchGeo = new THREE.ShapeGeometry(noMatchShape, 16);
+      const noMatchMat = new THREE.MeshStandardMaterial({
+        color: 0x1e293b,
+        transparent: true,
+        opacity: 0.7,
+        side: THREE.DoubleSide
+      });
+      const noMatchMesh = new THREE.Mesh(noMatchGeo, noMatchMat);
+      noMatchMesh.position.set(0, 0.130, 0.002);
+      this.suggestionsContainer.add(noMatchMesh);
+
+      const noMatchText = new Text();
+      noMatchText.text = `No matching tickers found for "${this.searchQuery}"`;
+      noMatchText.fontSize = 0.0085;
+      noMatchText.color = 0x94a3b8;
+      noMatchText.anchorX = 'center';
+      noMatchText.anchorY = 'middle';
+      noMatchText.position.set(0, 0.130, 0.004);
+      noMatchText.sync();
+      this.suggestionsContainer.add(noMatchText);
+      return;
+    }
+
+    const count = suggestions.length;
+    const chipW = Math.min(0.182, 0.76 / count - 0.015);
+    const chipH = 0.040;
+    const totalW = count * chipW + (count - 1) * 0.012;
+    const startX = -totalW / 2 + chipW / 2;
+    const stepX = chipW + 0.012;
+
+    suggestions.forEach((item, i) => {
+      const x = startX + i * stepX;
+      const y = 0.130;
+
+      const sectorColors = {
+        Equities: 0x00f0ff,
+        Crypto: 0xf59e0b,
+        Index: 0x10b981,
+        Bonds: 0x8b5cf6
+      };
+      const themeCol = sectorColors[item.sector] || 0x38bdf8;
+
+      const btnGroup = new THREE.Group();
+      btnGroup.position.set(x, y, 0.003);
+
+      const shape = this.createRoundedRectShape(chipW, chipH, 0.006);
+      const geo = new THREE.ShapeGeometry(shape, 16);
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0x0b1329,
+        roughness: 0.3,
+        metalness: 0.2,
+        emissive: new THREE.Color(themeCol),
+        emissiveIntensity: 0.22,
+        transparent: true,
+        opacity: 0.88,
+        side: THREE.DoubleSide
+      });
+      const btnMesh = new THREE.Mesh(geo, mat);
+      btnMesh.userData = {
+        isVRButton: true,
+        action: 'selectSearchSuggestion',
+        symbol: item.symbol,
+        stockData: item,
+        baseColor: 0x0b1329,
+        hoverColor: 0x1e293b,
+        emissiveColor: themeCol,
+        baseEmissiveIntensity: 0.22,
+        originalZ: 0.003
+      };
+      btnGroup.add(btnMesh);
+      this.searchPanelButtons.push(btnMesh);
+      this.searchSuggestionButtons.push(btnMesh);
+
+      // Border outline
+      const borderGeo = new THREE.BufferGeometry().setFromPoints(shape.getPoints(16));
+      const borderMat = new THREE.LineBasicMaterial({
+        color: themeCol,
+        transparent: true,
+        opacity: 0.65
+      });
+      const border = new THREE.LineLoop(borderGeo, borderMat);
+      border.position.z = 0.0005;
+      btnGroup.add(border);
+      btnMesh.userData.borderMesh = border;
+
+      // Chip Text: [ TICKER (EXCHANGE) | Company Name | Price ]
+      const txtTicker = new Text();
+      const exchangeTag = item.exchange ? ` (${item.exchange})` : ` (${item.sector})`;
+      txtTicker.text = `${item.symbol}${exchangeTag}`;
+      txtTicker.fontSize = 0.0078;
+      txtTicker.color = themeCol;
+      txtTicker.anchorX = 'center';
+      txtTicker.anchorY = 'middle';
+      txtTicker.position.set(0, 0.008, 0.002);
+      txtTicker.sync();
+      btnGroup.add(txtTicker);
+
+      const displayName = item.name.length > 13 ? item.name.slice(0, 12) + '…' : item.name;
+      const formattedPrice = formatCurrency(item.price, item.currency || 'USD');
+      const txtDetails = new Text();
+      txtDetails.text = `${displayName} | ${formattedPrice}`;
+      txtDetails.fontSize = 0.0068;
+      txtDetails.color = 0xf8fafc;
+      txtDetails.anchorX = 'center';
+      txtDetails.anchorY = 'middle';
+      txtDetails.position.set(0, -0.009, 0.002);
+      txtDetails.sync();
+      btnGroup.add(txtDetails);
+
+      this.suggestionsContainer.add(btnGroup);
+    });
+  }
+
+  /**
+   * Toggles the 3D Spatial Search Window & Virtual Keyboard in front of the VR user.
+   */
+  toggleSearchPanel(forceState) {
+    if (!this.searchPanel) return;
+
+    const nextVisible = forceState !== undefined ? Boolean(forceState) : !this.searchPanel.visible;
+    this.searchPanel.visible = nextVisible;
+
+    if (nextVisible) {
+      soundFx.playSelectSound();
+
+      // Position 1.1m directly in front of viewer's head orientation
+      const activeCamera = this.renderer.xr.isPresenting ? this.renderer.xr.getCamera() : this.camera;
+      const camPos = new THREE.Vector3();
+      const camQuat = new THREE.Quaternion();
+      activeCamera.getWorldPosition(camPos);
+      activeCamera.getWorldQuaternion(camQuat);
+
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camQuat);
+      const spawnPos = camPos.clone().add(forward.multiplyScalar(1.1));
+      this.searchPanel.position.copy(spawnPos);
+      this.searchPanel.quaternion.copy(camQuat);
+
+      this.updateSearchQueryDisplay();
+      this.updateSearchSuggestions();
+    } else {
+      soundFx.playCloseSound();
+    }
+  }
+
+  /**
    * Synchronizes Live Portfolio Net Worth on the Wrist Dock.
    */
   updateNetWorthText(text) {
@@ -1534,6 +2482,68 @@ export class XRManager {
       this.callbacks.onToggleManageData();
     } else if (action === 'closeDataPanel') {
       this.toggleSpatialDataPanel(false);
+    } else if (action === 'toggleQuickTickers') {
+      this.toggleQuickTickersSlate();
+    } else if (action === 'closeQuickTickersSlate') {
+      this.toggleQuickTickersSlate(false);
+    } else if (action === 'toggleSearchPanel') {
+      this.toggleSearchPanel();
+    } else if (action === 'closeSearchPanel') {
+      this.toggleSearchPanel(false);
+    } else if (action === 'keyPress') {
+      const char = buttonMesh.userData.char;
+      if (char !== undefined) {
+        if (this.searchQuery.length < 24) {
+          this.searchQuery += char;
+          this.cursorVisible = true;
+          this.updateSearchQueryDisplay();
+          this.updateSearchSuggestions();
+        }
+      }
+    } else if (action === 'keyBackspace') {
+      if (this.searchQuery.length > 0) {
+        this.searchQuery = this.searchQuery.slice(0, -1);
+        this.cursorVisible = true;
+        this.updateSearchQueryDisplay();
+        this.updateSearchSuggestions();
+      }
+    } else if (action === 'keyClear') {
+      this.searchQuery = '';
+      this.cursorVisible = true;
+      this.updateSearchQueryDisplay();
+      this.updateSearchSuggestions();
+    } else if (action === 'keySubmit') {
+      const topMatch = this.getFilteredSuggestions()[0];
+      const targetSym = topMatch ? topMatch.symbol : (this.searchQuery.trim().toUpperCase() || 'NVDA');
+      const stockData = topMatch || STOCK_CATALOG.find((s) => s.symbol === targetSym) || { symbol: targetSym, name: targetSym, price: 100, currency: 'USD' };
+      this.toggleSearchPanel(false);
+      if (this.callbacks.onSelectStock) {
+        this.callbacks.onSelectStock(targetSym, stockData);
+      } else if (this.callbacks.onSelectQuickTicker) {
+        this.callbacks.onSelectQuickTicker(targetSym, stockData);
+      }
+    } else if (action === 'selectSearchSuggestion') {
+      const sym = buttonMesh.userData.symbol;
+      const stockData = buttonMesh.userData.stockData || STOCK_CATALOG.find((s) => s.symbol === sym);
+      this.toggleSearchPanel(false);
+      if (sym) {
+        if (this.callbacks.onSelectStock) {
+          this.callbacks.onSelectStock(sym, stockData);
+        } else if (this.callbacks.onSelectQuickTicker) {
+          this.callbacks.onSelectQuickTicker(sym, stockData);
+        }
+      }
+    } else if (action === 'selectQuickTicker') {
+      const sym = buttonMesh.userData.symbol;
+      const stockData = STOCK_CATALOG.find((s) => s.symbol === sym);
+      this.toggleQuickTickersSlate(false);
+      if (sym) {
+        if (this.callbacks.onSelectStock) {
+          this.callbacks.onSelectStock(sym, stockData);
+        } else if (this.callbacks.onSelectQuickTicker) {
+          this.callbacks.onSelectQuickTicker(sym, stockData);
+        }
+      }
     } else if (action === 'adjustAsset') {
       const { assetId, delta } = buttonMesh.userData;
       if (this.callbacks.onAdjustAsset) {
@@ -1543,6 +2553,11 @@ export class XRManager {
       }
     } else if (action === 'closeChart' && this.callbacks.onCloseChart) {
       this.callbacks.onCloseChart();
+    } else if (action === 'setResolution') {
+      const presetId = buttonMesh.userData.presetId;
+      if (presetId) {
+        setChartResolutionPreset(presetId, this.scene);
+      }
     } else if (action === 'filterCategory' && this.callbacks.onFilterCategory) {
       this.callbacks.onFilterCategory(buttonMesh.userData.category);
     }
@@ -1552,38 +2567,72 @@ export class XRManager {
    * Processes intersections for raycaster against interactive objects, wrist dock buttons and spatial data panel.
    */
   processRayIntersections(raycaster, source) {
-    const interactiveObjects = this.callbacks.getInteractiveObjects
-      ? this.callbacks.getInteractiveObjects()
-      : [];
+    const interactiveObjectsList = [
+      ...interactiveObjects,
+      ...(this.callbacks.getInteractiveObjects ? this.callbacks.getInteractiveObjects() : [])
+    ];
 
     // Include Left-Wrist Holographic Palette buttons if dock is visible
     if (this.spatialDock?.visible) {
-      this.dockButtons.forEach((btn) => interactiveObjects.push(btn));
+      this.dockButtons.forEach((btn) => interactiveObjectsList.push(btn));
     }
 
     // Include 3D Spatial Manage Data Slate buttons if panel is visible
     if (this.spatialDataPanel?.visible) {
-      this.dataPanelButtons.forEach((btn) => interactiveObjects.push(btn));
+      this.dataPanelButtons.forEach((btn) => interactiveObjectsList.push(btn));
     }
 
-    const intersects = raycaster.intersectObjects(interactiveObjects, true);
+    // Include 3D Quick Tickers Slate buttons if slate is visible
+    if (this.quickTickersSlate?.visible) {
+      this.quickTickerButtons.forEach((btn) => interactiveObjectsList.push(btn));
+    }
+
+    // Include 3D Spatial Search Window & Virtual Keyboard buttons if panel is visible
+    if (this.searchPanel?.visible) {
+      this.searchPanelButtons.forEach((btn) => interactiveObjectsList.push(btn));
+    }
+
+    const intersects = raycaster.intersectObjects(interactiveObjectsList, true);
 
     if (intersects.length > 0) {
-      const hit = intersects[0].object;
+      // Find the target object or parent with interactive handler
+      let hit = intersects[0].object;
+      while (hit && !hit.userData?.onClick && !hit.userData?.isVRButton && !hit.userData?.isResolutionPreset && !hit.userData?.isCloseButton && !hit.userData?.isChartModeToggle && !hit.userData?.isAssetNode && hit.parent && hit !== this.scene) {
+        hit = hit.parent;
+      }
 
-      // 1. Check VR Button (Wrist Dock or Spatial Data Panel)
+      if (!hit) hit = intersects[0].object;
+
+      // 1. Direct onClick Callback (registered via registerInteractiveObject)
+      if (hit.userData?.onClick) {
+        this.animateButtonPress(hit);
+        hit.userData.onClick();
+        return;
+      }
+
+      // 2. Check Resolution Preset
+      if (hit.userData?.isResolutionPreset || hit.userData?.action === 'setResolution') {
+        this.animateButtonPress(hit);
+        const presetId = hit.userData.presetId;
+        if (presetId) {
+          setChartResolutionPreset(presetId, this.scene);
+        }
+        return;
+      }
+
+      // 3. Check VR Button (Wrist Dock, Spatial Data Panel, Quick Tickers Slate, Search Panel)
       if (hit.userData?.isVRButton) {
         this.animateButtonPress(hit);
         return;
       }
 
-      // 2. Check 3D Chart Close Button
+      // 4. Check 3D Chart Close Button
       if (hit.userData?.isCloseButton) {
         if (this.callbacks.onCloseChart) this.callbacks.onCloseChart();
         return;
       }
 
-      // 3. Check 3D Chart Display Mode Toggle [Spline / Candlestick]
+      // 5. Check 3D Chart Display Mode Toggle [Spline / Candlestick]
       if (hit.userData?.isChartModeToggle) {
         if (this.callbacks.onToggleChartMode) {
           this.callbacks.onToggleChartMode(hit.userData.targetMode);
@@ -1591,7 +2640,7 @@ export class XRManager {
         return;
       }
 
-      // 4. Check Planetary Node
+      // 6. Check Planetary Node
       let current = hit;
       while (current && (!current.userData || !current.userData.isAssetNode)) {
         current = current.parent;
@@ -1619,15 +2668,34 @@ export class XRManager {
   /**
    * Updates Left-Wrist orientation, hand pinch/poke detection, raycasting & hover states.
    */
-  update(interactiveObjects = []) {
+  update(interactiveObjectsArg = [], delta = 0.016) {
     if (!this.renderer.xr.isPresenting) return;
 
-    const allInteractive = [...interactiveObjects];
+    // Update Search Panel blinking cursor timer
+    if (this.searchPanel?.visible) {
+      this.cursorTimer = (this.cursorTimer || 0) + (delta || 0.016);
+      if (this.cursorTimer >= 0.53) {
+        this.cursorTimer = 0;
+        this.cursorVisible = !this.cursorVisible;
+        this.updateSearchQueryDisplay();
+      }
+    }
+
+    const allInteractive = [
+      ...interactiveObjects,
+      ...interactiveObjectsArg
+    ];
     if (this.spatialDock?.visible) {
       this.dockButtons.forEach((b) => allInteractive.push(b));
     }
     if (this.spatialDataPanel?.visible) {
       this.dataPanelButtons.forEach((b) => allInteractive.push(b));
+    }
+    if (this.quickTickersSlate?.visible) {
+      this.quickTickerButtons.forEach((b) => allInteractive.push(b));
+    }
+    if (this.searchPanel?.visible) {
+      this.searchPanelButtons.forEach((b) => allInteractive.push(b));
     }
 
     let anyHoveredPlanet = null;
@@ -1638,12 +2706,10 @@ export class XRManager {
     const leftController = this.controllers[0];
 
     if (leftHand && leftHand.joints?.['wrist']) {
-      // If hand tracking with wrist joint is active, reparent to left hand
       if (this.spatialDock.parent !== leftHand) {
         leftHand.add(this.spatialDock);
       }
     } else if (leftController) {
-      // Default to left controller for seamless 6-DoF controller and emulator support
       if (this.spatialDock.parent !== leftController) {
         leftController.add(this.spatialDock);
       }
@@ -1654,7 +2720,7 @@ export class XRManager {
       this.spatialDock.visible = this.renderer.xr.isPresenting;
     }
 
-    // 2. Proximity Poke Detection (Right Index Tip to Left Wrist Buttons or Spatial Data Slate Buttons)
+    // 2. Proximity Poke Detection (Right Index Tip to Buttons)
     const rightHand = this.hands[1];
     if (rightHand && rightHand.joints?.['index-finger-tip']) {
       const rightIndexTip = rightHand.joints['index-finger-tip'];
@@ -1663,15 +2729,10 @@ export class XRManager {
       let closestBtn = null;
       let minDistance = 0.038; // 3.8 cm touch trigger distance
 
-      const pokeCandidates = [];
-      if (this.spatialDock?.visible) {
-        this.dockButtons.forEach((btn) => pokeCandidates.push(btn));
-      }
-      if (this.spatialDataPanel?.visible) {
-        this.dataPanelButtons.forEach((btn) => pokeCandidates.push(btn));
-      }
+      const pokeCandidates = [...allInteractive];
 
       pokeCandidates.forEach((btn) => {
+        if (!btn || !btn.isObject3D) return;
         btn.getWorldPosition(this.tempVecB);
         const dist = this.tempVecA.distanceTo(this.tempVecB);
         if (dist < minDistance) {
@@ -1683,6 +2744,7 @@ export class XRManager {
       if (closestBtn && this.pokedVRButton !== closestBtn) {
         this.pokedVRButton = closestBtn;
         this.animateButtonPress(closestBtn);
+        if (closestBtn.userData?.onClick) closestBtn.userData.onClick();
       } else if (!closestBtn) {
         this.pokedVRButton = null;
       }
@@ -1730,14 +2792,14 @@ export class XRManager {
             }
 
             // Check target
-            if (hit.object.userData?.isVRButton) {
-              anyHoveredButton = hit.object;
-            } else {
-              let target = hit.object;
-              while (target && (!target.userData || !target.userData.isAssetNode)) {
-                target = target.parent;
-              }
-              if (target?.userData?.isAssetNode) anyHoveredPlanet = target;
+            let targetObj = hit.object;
+            while (targetObj && !targetObj.userData?.onClick && !targetObj.userData?.isVRButton && !targetObj.userData?.isResolutionPreset && !targetObj.userData?.isAssetNode && targetObj.parent && targetObj !== this.scene) {
+              targetObj = targetObj.parent;
+            }
+            if (targetObj?.userData?.onClick || targetObj?.userData?.isVRButton || targetObj?.userData?.isResolutionPreset) {
+              anyHoveredButton = targetObj;
+            } else if (targetObj?.userData?.isAssetNode) {
+              anyHoveredPlanet = targetObj;
             }
           } else {
             if (reticle) reticle.visible = false;
@@ -1766,34 +2828,55 @@ export class XRManager {
           reticle.visible = true;
         }
 
-        if (hit.object.userData?.isVRButton) {
-          anyHoveredButton = hit.object;
-        } else {
-          let target = hit.object;
-          while (target && (!target.userData || !target.userData.isAssetNode)) {
-            target = target.parent;
-          }
-          if (target?.userData?.isAssetNode) {
-            anyHoveredPlanet = target;
-          }
+        let targetObj = hit.object;
+        while (targetObj && !targetObj.userData?.onClick && !targetObj.userData?.isVRButton && !targetObj.userData?.isResolutionPreset && !targetObj.userData?.isAssetNode && targetObj.parent && targetObj !== this.scene) {
+          targetObj = targetObj.parent;
+        }
+
+        if (targetObj?.userData?.onClick || targetObj?.userData?.isVRButton || targetObj?.userData?.isResolutionPreset) {
+          anyHoveredButton = targetObj;
+        } else if (targetObj?.userData?.isAssetNode) {
+          anyHoveredPlanet = targetObj;
         }
       } else {
         if (reticle) reticle.visible = false;
       }
     }
 
-    // 5. Update Button Hover Highlights
+    // 5. Update Button Hover Highlights (0.2 -> 0.8 emissive neon cyan feedback)
     if (this.hoveredVRButton !== anyHoveredButton) {
       if (this.hoveredVRButton) {
-        const base = this.hoveredVRButton.userData.baseColor || 0x1e293b;
-        const baseEmissive = this.hoveredVRButton.userData.baseEmissiveIntensity ?? 0.15;
-        this.hoveredVRButton.material.color.setHex(base);
-        this.hoveredVRButton.material.emissiveIntensity = baseEmissive;
+        const ud = this.hoveredVRButton.userData;
+        const base = ud.baseColor || 0x1e293b;
+        const baseEmissive = ud.baseEmissiveIntensity ?? 0.20;
+        if (this.hoveredVRButton.material) {
+          if (this.hoveredVRButton.material.color) this.hoveredVRButton.material.color.setHex(base);
+          if (this.hoveredVRButton.material.emissive) {
+            const emissiveCol = ud.emissiveColor || base;
+            this.hoveredVRButton.material.emissive.setHex(emissiveCol);
+            this.hoveredVRButton.material.emissiveIntensity = baseEmissive;
+          }
+        }
+        if (ud.borderMesh?.material) {
+          ud.borderMesh.material.color.setHex(ud.borderColor || 0x334155);
+          ud.borderMesh.material.opacity = 0.85;
+        }
       }
       if (anyHoveredButton) {
-        const hover = anyHoveredButton.userData.hoverColor || 0x38bdf8;
-        anyHoveredButton.material.color.setHex(hover);
-        anyHoveredButton.material.emissiveIntensity = Math.max(0.45, (anyHoveredButton.userData.baseEmissiveIntensity || 0) + 0.2);
+        const ud = anyHoveredButton.userData;
+        const hover = ud.hoverColor || 0x06b6d4;
+        const hoverEmissive = ud.hoverEmissiveIntensity ?? 0.80;
+        if (anyHoveredButton.material) {
+          if (anyHoveredButton.material.color) anyHoveredButton.material.color.setHex(hover);
+          if (anyHoveredButton.material.emissive) {
+            anyHoveredButton.material.emissive.setHex(0x06b6d4);
+            anyHoveredButton.material.emissiveIntensity = hoverEmissive;
+          }
+        }
+        if (ud.borderMesh?.material) {
+          ud.borderMesh.material.color.setHex(0x00f0ff);
+          ud.borderMesh.material.opacity = 1.0;
+        }
         soundFx.playHoverSound();
       }
       this.hoveredVRButton = anyHoveredButton;

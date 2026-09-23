@@ -215,15 +215,42 @@ export const INSTITUTIONAL_PORTFOLIO = [
   }
 ];
 
+/**
+ * Curated top Indian equities and market indices (NSE / BSE) with INR currency
+ */
+export const INDIAN_STOCKS = [
+  { symbol: 'RELIANCE', exchange: 'NSE', name: 'Reliance Industries', price: 2980.50, currency: 'INR', sector: 'Equities' },
+  { symbol: 'TCS', exchange: 'NSE', name: 'Tata Consultancy Services', price: 4210.00, currency: 'INR', sector: 'Equities' },
+  { symbol: 'HDFCBANK', exchange: 'NSE', name: 'HDFC Bank Ltd', price: 1640.25, currency: 'INR', sector: 'Equities' },
+  { symbol: 'INFY', exchange: 'NSE', name: 'Infosys Ltd', price: 1890.75, currency: 'INR', sector: 'Equities' },
+  { symbol: 'NIFTY50', exchange: 'NSE', name: 'NIFTY 50 Index', price: 25150.00, currency: 'INR', sector: 'Index' },
+  { symbol: 'TATAMOTORS', exchange: 'NSE', name: 'Tata Motors Ltd', price: 1080.30, currency: 'INR', sector: 'Equities' }
+];
+
+/**
+ * Universal Currency Formatter supporting INR (₹) and USD ($) with locale-specific formatting.
+ */
+export function formatCurrency(value, currency = 'USD') {
+  const num = typeof value === 'number' ? value : parseFloat(value) || 0;
+  const isINR = (currency || '').toUpperCase() === 'INR';
+  const sym = isINR ? '₹' : '$';
+  const formattedNum = isINR
+    ? num.toLocaleString('en-IN', { minimumFractionDigits: num % 1 !== 0 ? 2 : 0, maximumFractionDigits: 2 })
+    : num.toLocaleString(undefined, { minimumFractionDigits: num % 1 !== 0 ? 2 : 0, maximumFractionDigits: 2 });
+  return `${sym}${formattedNum}`;
+}
+
 export const PRESET_PROFILES = {
   'institutional': {
     name: 'Institutional Balanced Core',
     description: 'Diversified institutional allocation across US Equities (58%), Fixed Income (29%), Crypto (8%), and Cash (5%).',
+    currency: 'USD',
     assets: INSTITUTIONAL_PORTFOLIO
   },
   'tech-growth': {
     name: 'Aggressive Tech & AI Growth',
     description: 'Heavy tilt into semiconductor pioneers, large-cap software, and digital infrastructure.',
+    currency: 'USD',
     assets: [
       { id: 'eq-nvda', name: 'NVIDIA Corp', ticker: 'NVDA', category: 'Equities', value: 450000, returns: 188.0, volatility: 'high', color: '#10b981' },
       { id: 'eq-msft', name: 'Microsoft Corp', ticker: 'MSFT', category: 'Equities', value: 350000, returns: 26.0, volatility: 'medium', color: '#38bdf8' },
@@ -232,9 +259,26 @@ export const PRESET_PROFILES = {
       { id: 'cash-usd', name: 'USD Yield', ticker: 'USD', category: 'Liquid Cash', value: 75000, returns: 5.0, volatility: 'low', color: '#64748b' }
     ]
   },
+  'india-bluechip': {
+    name: 'India NIFTY Bluechip Growth (₹)',
+    description: 'Premier NSE/BSE institutional leaders across energy (RELIANCE), IT (TCS, INFY), banking (HDFCBANK), auto (TATAMOTORS), and NIFTY 50 index.',
+    currency: 'INR',
+    monthlyInflow: '+₹5,35,000',
+    monthlyOutflow: '-₹3,20,000',
+    netMonthlySavings: '+₹2,15,000 / mo',
+    assets: [
+      { id: 'eq-reliance', name: 'Reliance Industries', ticker: 'RELIANCE', category: 'Equities', value: 4500000, returns: 28.5, volatility: 'medium', color: '#00f0ff', currency: 'INR', exchange: 'NSE' },
+      { id: 'eq-tcs', name: 'Tata Consultancy Services', ticker: 'TCS', category: 'Equities', value: 3800000, returns: 22.4, volatility: 'low', color: '#38bdf8', currency: 'INR', exchange: 'NSE' },
+      { id: 'eq-hdfc', name: 'HDFC Bank Ltd', ticker: 'HDFCBANK', category: 'Equities', value: 3200000, returns: 18.2, volatility: 'low', color: '#8b5cf6', currency: 'INR', exchange: 'NSE' },
+      { id: 'eq-infy', name: 'Infosys Ltd', ticker: 'INFY', category: 'Equities', value: 2500000, returns: 24.8, volatility: 'medium', color: '#10b981', currency: 'INR', exchange: 'NSE' },
+      { id: 'idx-nifty', name: 'NIFTY 50 Index', ticker: 'NIFTY50', category: 'Index Funds', value: 3000000, returns: 16.5, volatility: 'low', color: '#f59e0b', currency: 'INR', exchange: 'NSE' },
+      { id: 'eq-tatamotors', name: 'Tata Motors', ticker: 'TATAMOTORS', category: 'Equities', value: 1500000, returns: 52.0, volatility: 'high', color: '#ec4899', currency: 'INR', exchange: 'NSE' }
+    ]
+  },
   'fixed-income': {
     name: 'Capital Preservation & Income',
     description: 'Preservation-first posture with high-coupon Treasuries, corporate bonds, and index baseline.',
+    currency: 'USD',
     assets: [
       { id: 'fi-tlt', name: 'US Treasury 20Y', ticker: 'TLT', category: 'Fixed Income', value: 500000, returns: -1.5, volatility: 'low', color: '#f59e0b' },
       { id: 'fi-bnd', name: 'Vanguard Total Bond', ticker: 'BND', category: 'Fixed Income', value: 400000, returns: 3.0, volatility: 'low', color: '#fbbf24' },
@@ -321,17 +365,23 @@ export function recalculatePortfolio() {
 
   // 2. Compute normalized allocations and orbital placement
   let weightedReturns = 0;
+  const currentProfile = PRESET_PROFILES[portfolioState.currentPreset];
+  const portfolioCurrency = currentProfile?.currency || (portfolioState.assets[0]?.currency) || 'USD';
+  const isINR = portfolioCurrency.toUpperCase() === 'INR';
+  const sym = isINR ? '₹' : '$';
 
   portfolioState.assets.forEach((asset, idx) => {
+    const assetCurrency = asset.currency || portfolioCurrency;
     // Allocation % normalized strictly
     const allocation = (asset.value / totalPortfolioValue) * 100;
     asset.allocation = Math.round(allocation * 10) / 10;
 
-    asset.formattedValue = `$${Math.round(asset.value).toLocaleString()}`;
+    asset.formattedValue = formatCurrency(asset.value, assetCurrency);
     asset.formattedReturns = `${asset.returns >= 0 ? '+' : ''}${asset.returns}%`;
 
     const pnlNum = Math.round(asset.value * (asset.returns / (100 + asset.returns || 1)));
-    asset.pnl = `${pnlNum >= 0 ? '+' : ''}$${Math.abs(pnlNum).toLocaleString()}`;
+    const assetSym = (assetCurrency || '').toUpperCase() === 'INR' ? '₹' : '$';
+    asset.pnl = `${pnlNum >= 0 ? '+' : '-'}${assetSym}${Math.abs(pnlNum).toLocaleString(assetCurrency === 'INR' ? 'en-IN' : undefined)}`;
 
     // Clean non-NaN orbital coordinates (comfortable spread: 5.0 + idx * 2.8)
     asset.orbitRadius = 5.0 + idx * 2.8;
@@ -361,14 +411,15 @@ export function recalculatePortfolio() {
 
   portfolioState.summary = {
     totalNetWorth: totalPortfolioValue,
-    formattedNetWorth: `$${Math.round(totalPortfolioValue).toLocaleString()}`,
+    currency: portfolioCurrency,
+    formattedNetWorth: formatCurrency(totalPortfolioValue, portfolioCurrency),
     totalReturns: totalReturnsRounded,
     formattedReturns: `${totalReturnsRounded >= 0 ? '+' : ''}${totalReturnsRounded}% 1Y`,
-    totalProfitLoss: `${totalPnL >= 0 ? '+' : ''}$${Math.abs(totalPnL).toLocaleString()}`,
-    monthlyInflow: '+$6,420',
-    monthlyOutflow: '-$3,850',
-    netMonthlySavings: '+$2,570 / mo',
-    monthlyCashFlow: '+$2,570 / mo',
+    totalProfitLoss: `${totalPnL >= 0 ? '+' : '-'}${sym}${Math.abs(totalPnL).toLocaleString(isINR ? 'en-IN' : undefined)}`,
+    monthlyInflow: currentProfile?.monthlyInflow || (isINR ? '+₹5,35,000' : '+$6,420'),
+    monthlyOutflow: currentProfile?.monthlyOutflow || (isINR ? '-₹3,20,000' : '-$3,850'),
+    netMonthlySavings: currentProfile?.netMonthlySavings || (isINR ? '+₹2,15,000 / mo' : '+$2,570 / mo'),
+    monthlyCashFlow: currentProfile?.netMonthlySavings || (isINR ? '+₹2,15,000 / mo' : '+$2,570 / mo'),
     annualYield: '3.85%'
   };
 

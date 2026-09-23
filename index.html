@@ -90,9 +90,36 @@
 
       <!-- Middle HUD: Category Filter & Inspector Card -->
       <div class="hud-middle">
-        <!-- Left Filter Rail -->
+        <!-- Left Filter Rail & Real-Time Stock Search -->
         <div class="filter-rail glass-panel interactive" id="filter-rail">
-          <div class="rail-title">Sectors & Filters</div>
+          <div class="rail-title">Live Market Search</div>
+          
+          <div class="stock-search-box">
+            <div class="search-input-wrapper">
+              <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+              </svg>
+              <input type="text" id="stock-search-input" placeholder="Search Ticker (e.g. NVDA, AAPL, BTC)..." autocomplete="off" spellcheck="false" />
+              <button id="btn-clear-search" class="btn-clear-search" title="Clear search" style="display: none;">✕</button>
+            </div>
+            <!-- Auto-Suggestions Dropdown -->
+            <div id="stock-search-suggestions" class="search-suggestions-dropdown"></div>
+          </div>
+
+          <!-- Quick Tickers Row -->
+          <div class="quick-tickers-row">
+            <button class="quick-ticker-pill" data-ticker="NVDA">NVDA</button>
+            <button class="quick-ticker-pill" data-ticker="AAPL">AAPL</button>
+            <button class="quick-ticker-pill" data-ticker="RELIANCE">RELIANCE</button>
+            <button class="quick-ticker-pill" data-ticker="TCS">TCS</button>
+            <button class="quick-ticker-pill" data-ticker="NIFTY50">NIFTY50</button>
+            <button class="quick-ticker-pill" data-ticker="BTC">BTC</button>
+            <button class="quick-ticker-pill" data-ticker="MSFT">MSFT</button>
+            <button class="quick-ticker-pill" data-ticker="TSLA">TSLA</button>
+          </div>
+
+          <div class="rail-title" style="margin-top: 8px;">Sectors & Filters</div>
           <button class="category-chip active" data-category="all">
             <span><span class="chip-dot" style="color: #ffffff; background: #ffffff;"></span>All Assets</span>
             <span class="chip-count">ALL</span>
@@ -123,7 +150,10 @@
         <div class="inspector-card glass-panel interactive" id="inspector-card">
           <div class="card-top">
             <div class="card-title-group">
-              <span class="card-ticker" id="card-ticker">TECH.BASKET</span>
+              <div class="card-ticker-row">
+                <span class="card-ticker" id="card-ticker">TECH.BASKET</span>
+                <span class="live-pulse-badge" id="card-live-badge"><span class="live-pulse-dot"></span>LIVE FEED</span>
+              </div>
               <h2 class="card-name" id="card-name">Tech Equities</h2>
             </div>
             <button class="btn-close" id="btn-close-card" title="Close Panel">
@@ -153,9 +183,71 @@
             </div>
           </div>
 
-          <p class="card-desc" id="card-desc">
-            High-conviction core positions in AI compute infrastructure, semiconductor pioneers, and cloud platforms.
-          </p>
+          <!-- TradingView Dual-Parameter Timeframe & Interval Resolution Selector -->
+          <div class="card-resolution-section">
+            <div class="resolution-header">
+              <span class="resolution-title">⏱ Timeframe & Interval</span>
+              <div class="resolution-dropdown-trigger interactive" id="btn-resolution-dropdown" title="Open TradingView Resolution Selector">
+                <span id="current-resolution-label">1Y · 1D</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
+              </div>
+            </div>
+            
+            <div class="resolution-pills-row">
+              <button class="resolution-pill" data-preset="1D_1m">1D·1m</button>
+              <button class="resolution-pill" data-preset="5D_5m">5D·5m</button>
+              <button class="resolution-pill" data-preset="1M_30m">1M·30m</button>
+              <button class="resolution-pill" data-preset="3M_1h">3M·1h</button>
+              <button class="resolution-pill" data-preset="6M_2h">6M·2h</button>
+              <button class="resolution-pill" data-preset="YTD_1d">YTD·1D</button>
+              <button class="resolution-pill active" data-preset="1Y_1d">1Y·1D</button>
+              <button class="resolution-pill" data-preset="5Y_1w">5Y·1W</button>
+              <button class="resolution-pill" data-preset="ALL_1M">ALL·1M</button>
+            </div>
+
+            <!-- TradingView Bottom-Sheet / Dropdown Menu matching exact mobile screenshot -->
+            <div class="resolution-menu glass-panel" id="resolution-menu">
+              <div class="resolution-menu-header">TradingView Interval Resolution</div>
+              <div class="resolution-item" data-preset="1D_1m">
+                <span class="res-item-full">1 day in 1 minute intervals</span>
+                <span class="res-item-badge">1D · 1m</span>
+              </div>
+              <div class="resolution-item" data-preset="5D_5m">
+                <span class="res-item-full">5 days in 5 minutes intervals</span>
+                <span class="res-item-badge">5D · 5m</span>
+              </div>
+              <div class="resolution-item" data-preset="1M_30m">
+                <span class="res-item-full">1 month in 30 minutes intervals</span>
+                <span class="res-item-badge">1M · 30m</span>
+              </div>
+              <div class="resolution-item" data-preset="3M_1h">
+                <span class="res-item-full">3 months in 1 hour intervals</span>
+                <span class="res-item-badge">3M · 1h</span>
+              </div>
+              <div class="resolution-item" data-preset="6M_2h">
+                <span class="res-item-full">6 months in 2 hours intervals</span>
+                <span class="res-item-badge">6M · 2h</span>
+              </div>
+              <div class="resolution-item" data-preset="YTD_1d">
+                <span class="res-item-full">Year to date in 1 day intervals</span>
+                <span class="res-item-badge">YTD · 1D</span>
+              </div>
+              <div class="resolution-item active" data-preset="1Y_1d">
+                <span class="res-item-full">1 year in 1 day intervals</span>
+                <span class="res-item-badge">1Y · 1D</span>
+              </div>
+              <div class="resolution-item" data-preset="5Y_1w">
+                <span class="res-item-full">5 years in 1 week intervals</span>
+                <span class="res-item-badge">5Y · 1W</span>
+              </div>
+              <div class="resolution-item" data-preset="ALL_1M">
+                <span class="res-item-full">All data in 1 month intervals</span>
+                <span class="res-item-badge">ALL · 1M</span>
+              </div>
+            </div>
+          </div>
 
           <div class="card-actions">
             <div class="chart-type-segmented">
@@ -236,6 +328,7 @@
               <select id="preset-select" class="modal-select">
                 <option value="institutional">🏛️ Institutional Balanced Core (58% Eq / 29% Bnd / 8% Alt / 5% Cash)</option>
                 <option value="tech-growth">🚀 Aggressive Tech & AI Growth (NVDA, MSFT, BTC)</option>
+                <option value="india-bluechip">🇮🇳 India NIFTY Bluechip Growth (₹ - RELIANCE, TCS, HDFC, INFY, NIFTY50)</option>
                 <option value="fixed-income">🛡️ Capital Preservation & Income (TLT, BND, IVV)</option>
               </select>
             </div>

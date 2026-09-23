@@ -17,7 +17,9 @@ import {
   loadPresetProfile,
   addAsset,
   deleteAsset,
-  adjustAssetAllocation
+  adjustAssetAllocation,
+  formatCurrency,
+  INDIAN_STOCKS
 } from './data.js';
 import {
   planetsGroup,
@@ -37,13 +39,27 @@ import {
   render3DCandlestickChart,
   removeCurrentChart,
   getCurrentChart,
+  getActiveChartData,
   updateActiveChart,
+  updateChartWithRealtimeData,
+  applyLiveTickUpdate,
   setChartDisplayMode,
   getChartDisplayMode,
-  setCandleHoverState
+  setCandleHoverState,
+  setChartResolutionPreset,
+  RESOLUTION_PRESETS
 } from './charts.js';
-import { XRManager } from './xr-manager.js';
+import {
+  searchTickers,
+  fetchStockCandles,
+  subscribeLiveTicks,
+  POPULAR_TICKERS
+} from './stock-api.js';
+import { XRManager, STOCK_CATALOG } from './xr-manager.js';
 import { soundFx } from './audio.js';
+
+let activeTickUnsubscribe = null;
+let activeLiveSymbol = null;
 
 /* ==========================================================================
    State & Scene Variables
@@ -58,8 +74,36 @@ let hoveredCandleMesh = null;
 let selectedPlanetMesh = null;
 let currentCategory = 'ALL';
 let isAutoOrbiting = true;
+let wasOrbitRunning = true;
 let currentFlowMode = 'both';
 let clock = new THREE.Clock();
+
+function pauseOrbitForChart() {
+  wasOrbitRunning = isAutoOrbiting;
+  isAutoOrbiting = false;
+  const btnAutoOrbit = document.getElementById('btn-auto-orbit');
+  if (btnAutoOrbit) {
+    btnAutoOrbit.classList.toggle('active', false);
+    const span = btnAutoOrbit.querySelector('span');
+    if (span) span.textContent = 'Orbit: PAUSED';
+  }
+  if (xrManager?.updateOrbitStatus) {
+    xrManager.updateOrbitStatus(false);
+  }
+}
+
+function restoreOrbitAfterChart() {
+  isAutoOrbiting = wasOrbitRunning;
+  const btnAutoOrbit = document.getElementById('btn-auto-orbit');
+  if (btnAutoOrbit) {
+    btnAutoOrbit.classList.toggle('active', isAutoOrbiting);
+    const span = btnAutoOrbit.querySelector('span');
+    if (span) span.textContent = isAutoOrbiting ? 'Orbit: ON' : 'Orbit: PAUSED';
+  }
+  if (xrManager?.updateOrbitStatus) {
+    xrManager.updateOrbitStatus(isAutoOrbiting);
+  }
+}
 
 /* ==========================================================================
    Initialization
@@ -136,7 +180,7 @@ function init() {
       const chart = getCurrentChart();
       if (chart) {
         chart.traverse((child) => {
-          if (child.userData?.isCloseButton || child.userData?.isChartModeToggle || child.userData?.isCandle) {
+          if (child.userData?.isCloseButton || child.userData?.isChartModeToggle || child.userData?.isCandle || child.userData?.isResolutionPreset || child.userData?.isVRButton || child.userData?.onClick || child.userData?.isInteractive) {
             objects.push(child);
           }
         });
@@ -155,7 +199,7 @@ function init() {
       if (getCurrentChart()) {
         handleCloseChart();
       } else if (selectedPlanetMesh) {
-        show3DSplineChart(selectedPlanetMesh, scene);
+        selectPlanet(selectedPlanetMesh);
       } else if (planetsGroup.children.length > 0) {
         const first = planetsGroup.children[0].userData?.primaryMesh || planetsGroup.children[0];
         selectPlanet(first);
@@ -186,6 +230,12 @@ function init() {
       const nextMode = targetMode || (currentMode === 'spline' ? 'candlestick' : 'spline');
       setChartDisplayMode(nextMode);
       if (xrManager?.updateChartMode) xrManager.updateChartMode(nextMode);
+    },
+    onSelectQuickTicker: (symbol, stockData) => {
+      selectStockSymbol(symbol, stockData);
+    },
+    onSelectStock: (symbol, stockData) => {
+      selectStockSymbol(symbol, stockData);
     }
   });
 
@@ -386,7 +436,7 @@ function onPortfolioChanged() {
 }
 
 /* ==========================================================================
-   Selection & Dynamic Camera Framing
+   Selection & Chart Viewport Summoning
    ========================================================================== */
 export function selectPlanet(planetMesh) {
   if (!planetMesh) return;
@@ -395,52 +445,16 @@ export function selectPlanet(planetMesh) {
   // Isolate active planet: hide background floating Troika labels
   setLabelsOcclusionState(planetMesh);
 
-  // Spawn High-Tech Holographic Financial HUD
-  show3DSplineChart(planetMesh, scene);
+  // Auto-pause planetary orbit during chart inspection
+  pauseOrbitForChart();
+
+  // Summon High-Tech Holographic Financial HUD directly into user viewport
+  const isVR = Boolean(renderer?.xr?.isPresenting);
+  const activeCamera = (isVR && renderer?.xr?.getCamera) ? renderer.xr.getCamera() : camera;
+  show3DSplineChart(planetMesh, scene, { camera: activeCamera, isVR, renderer });
 
   // Update HUD Card
   updateHUDCard(planetMesh.userData);
-
-  // 1. WebXR: Dynamic User Rig Focus / Fly-To in front of target planet
-  if (xrManager?.flyToTarget) {
-    xrManager.flyToTarget(planetMesh);
-  }
-
-  // 2. Desktop: Dynamic Camera Distance Framing
-  if (!renderer.xr.isPresenting) {
-    const targetMesh = planetMesh;
-    const planetRadius = targetMesh.geometry?.parameters?.radius || targetMesh.userData?.radius || 0.6;
-    const targetWorldPos = new THREE.Vector3();
-    targetMesh.getWorldPosition(targetWorldPos);
-
-    // Calculate a comfortable viewing offset: 5.5m back along viewing axis, elevated 1.8m
-    const viewOffset = targetWorldPos.clone().sub(new THREE.Vector3(0, 0, 0));
-    if (viewOffset.lengthSq() < 0.001) viewOffset.set(0, 0, 1);
-    viewOffset.normalize().multiplyScalar(5.5 + planetRadius * 1.5);
-    viewOffset.y += 1.8;
-    const desiredCamPos = targetWorldPos.clone().add(viewOffset);
-
-    // Look-at point centered between planet and floating chart
-    const lookTarget = targetWorldPos.clone().add(new THREE.Vector3(0, 0.8, 0));
-
-    focusCameraOnNode(lookTarget, desiredCamPos);
-  }
-}
-
-function focusCameraOnNode(lookTarget, desiredCamPos) {
-  const finalCamPos = desiredCamPos || lookTarget.clone().add(new THREE.Vector3(0, 3.5, 16.0));
-
-  const twPos = new TWEEN.Tween(camera.position)
-    .to({ x: finalCamPos.x, y: finalCamPos.y, z: finalCamPos.z }, 950)
-    .easing(TWEEN.Easing.Cubic.Out);
-  TWEEN.add(twPos);
-  twPos.start();
-
-  const twTgt = new TWEEN.Tween(controls.target)
-    .to({ x: lookTarget.x, y: lookTarget.y, z: lookTarget.z }, 950)
-    .easing(TWEEN.Easing.Cubic.Out);
-  TWEEN.add(twTgt);
-  twTgt.start();
 }
 
 export function handleExitVR() {
@@ -485,11 +499,137 @@ export function resetCameraView() {
 }
 
 function handleCloseChart() {
+  if (activeTickUnsubscribe) {
+    activeTickUnsubscribe();
+    activeTickUnsubscribe = null;
+  }
+  activeLiveSymbol = null;
   removeCurrentChart(scene);
   setLabelsOcclusionState(null); // Restore all floating planet labels
   const card = document.getElementById('inspector-card');
   if (card) card.classList.remove('visible');
   selectedPlanetMesh = null;
+  document.querySelectorAll('.quick-ticker-pill').forEach((p) => p.classList.remove('active'));
+
+  // Restore orbit state after chart inspection
+  restoreOrbitAfterChart();
+}
+
+export async function selectStockSymbol(symbol, stockMetadata = null) {
+  if (!symbol) return;
+  const sym = symbol.toUpperCase().trim();
+  activeLiveSymbol = sym;
+
+  if (activeTickUnsubscribe) {
+    activeTickUnsubscribe();
+    activeTickUnsubscribe = null;
+  }
+
+  soundFx.playSelectSound();
+
+  // Highlight matching quick ticker pill
+  document.querySelectorAll('.quick-ticker-pill').forEach((pill) => {
+    pill.classList.toggle('active', pill.getAttribute('data-ticker') === sym);
+  });
+
+  // Find if matching planet exists in scene
+  let targetPlanet = null;
+  planetsGroup.traverse((child) => {
+    if (child.userData?.isAssetNode && (child.userData.ticker?.toUpperCase() === sym || child.userData.symbol?.toUpperCase() === sym)) {
+      targetPlanet = child;
+    }
+  });
+
+  // Prepare full stock object
+  let stockData = stockMetadata;
+  if (!stockData) {
+    stockData = STOCK_CATALOG.find((s) => s.symbol.toUpperCase() === sym) ||
+                INDIAN_STOCKS.find((s) => s.symbol.toUpperCase() === sym) ||
+                (targetPlanet?.userData ? { ...targetPlanet.userData, symbol: sym } : null) ||
+                { symbol: sym, ticker: sym, name: sym, price: 100, currency: 'USD', exchange: '' };
+  }
+
+  // Ensure consistent fields
+  stockData = {
+    ...stockData,
+    symbol: sym,
+    ticker: sym,
+    name: stockData.name || sym,
+    price: stockData.price ?? 100,
+    currency: stockData.currency || (stockData.exchange === 'NSE' || stockData.exchange === 'BSE' || INDIAN_STOCKS.some((s) => s.symbol === sym) ? 'INR' : 'USD'),
+    exchange: stockData.exchange || (stockData.currency === 'INR' ? 'NSE' : '')
+  };
+
+  if (targetPlanet) {
+    selectedPlanetMesh = targetPlanet;
+    setLabelsOcclusionState(targetPlanet);
+  } else {
+    selectedPlanetMesh = null;
+    setLabelsOcclusionState(null);
+  }
+
+  // Auto-pause planetary orbit during chart inspection
+  pauseOrbitForChart();
+
+  // Summon 3D Chart directly to user's viewport without camera fly-to
+  const isVR = Boolean(renderer?.xr?.isPresenting);
+  const activeCamera = (isVR && renderer?.xr?.getCamera) ? renderer.xr.getCamera() : camera;
+  show3DSplineChart(targetPlanet || stockData, scene, { camera: activeCamera, isVR, renderer });
+
+  // Update 2D Inspector Card immediately
+  updateHUDCardWithLiveData({
+    ...stockData,
+    latestPrice: stockData.price,
+    changePercent: stockData.returns || 4.5
+  });
+
+  // Fetch real-time candle data via Finnhub API service (or synthetic fallback)
+  try {
+    const liveData = await fetchStockCandles(sym);
+    updateChartWithRealtimeData(sym, liveData, scene);
+
+    // Update 2D Inspector Card with live data
+    updateHUDCardWithLiveData(liveData);
+
+    // Subscribe to live WebSocket trade ticks stream
+    activeTickUnsubscribe = subscribeLiveTicks(sym, (tick) => {
+      applyLiveTickUpdate(tick);
+
+      // Dynamically update Inspector card return percentage if open
+      const retElem = document.getElementById('card-returns');
+      if (retElem && liveData) {
+        const firstPrice = liveData.candles[0]?.open || liveData.latestPrice;
+        const changePct = Math.round(((tick.price - firstPrice) / firstPrice) * 10000) / 100;
+        retElem.textContent = `${changePct >= 0 ? '+' : ''}${changePct}%`;
+        retElem.style.color = changePct >= 0 ? 'var(--color-accent-green)' : 'var(--color-danger)';
+      }
+    });
+  } catch (err) {
+    console.warn('Failed to load stock data for:', sym, err);
+  }
+}
+
+function updateHUDCardWithLiveData(liveData) {
+  const card = document.getElementById('inspector-card');
+  if (!card || !liveData) return;
+
+  const isPositive = (liveData.changePercent ?? 0) >= 0;
+  const currency = liveData.currency || (liveData.exchange === 'NSE' || liveData.exchange === 'BSE' ? 'INR' : 'USD');
+  const formattedPrice = formatCurrency(liveData.latestPrice, currency);
+
+  document.getElementById('card-ticker').textContent = `${liveData.symbol}${liveData.exchange ? ` (${liveData.exchange})` : ''}`;
+  document.getElementById('card-name').textContent = liveData.name || liveData.symbol;
+  document.getElementById('card-allocation').textContent = `Live Price: ${formattedPrice}`;
+  const returnsElem = document.getElementById('card-returns');
+  if (returnsElem) {
+    returnsElem.textContent = `${isPositive ? '+' : ''}${liveData.changePercent}%`;
+    returnsElem.style.color = isPositive ? 'var(--color-accent-green)' : 'var(--color-danger)';
+  }
+  document.getElementById('card-sharpe').textContent = liveData.sharpe || '2.45';
+  document.getElementById('card-volatility').textContent = (liveData.volatility || 'MED').toUpperCase();
+  document.getElementById('card-desc').textContent = `Real-time Finnhub market data feed for ${liveData.name || liveData.symbol}. Live OHLC bars & WebSocket ticks streaming active.`;
+
+  card.classList.add('visible');
 }
 
 function updateHUDCard(data) {
@@ -668,7 +808,7 @@ function onPointerClick(event) {
 
   mouseRaycaster.setFromCamera(mousePointer, camera);
 
-  // Check 3D Chart close button & 3D mode toggles
+  // Check 3D Chart close button, 3D mode toggles & resolution preset buttons
   const currentChart = getCurrentChart();
   if (currentChart) {
     const chartHits = mouseRaycaster.intersectObject(currentChart, true);
@@ -680,6 +820,10 @@ function onPointerClick(event) {
         }
         if (hit.object.userData?.isChartModeToggle) {
           setChartDisplayMode(hit.object.userData.targetMode);
+          return;
+        }
+        if (hit.object.userData?.isResolutionPreset) {
+          setChartResolutionPreset(hit.object.userData.presetId, scene);
           return;
         }
       }
@@ -796,6 +940,43 @@ function setupEventListeners() {
     });
   }
 
+  // TradingView Dual-Parameter Timeframe & Resolution Selector (Pills & Dropdown Menu)
+  document.querySelectorAll('.resolution-pill').forEach((pill) => {
+    pill.addEventListener('click', () => {
+      const presetId = pill.getAttribute('data-preset');
+      if (presetId) {
+        setChartResolutionPreset(presetId, scene);
+      }
+    });
+  });
+
+  const btnResDropdown = document.getElementById('btn-resolution-dropdown');
+  const resMenu = document.getElementById('resolution-menu');
+  if (btnResDropdown && resMenu) {
+    btnResDropdown.addEventListener('click', (e) => {
+      e.stopPropagation();
+      resMenu.classList.toggle('active');
+      soundFx.playSelectSound();
+    });
+  }
+
+  document.querySelectorAll('.resolution-item').forEach((item) => {
+    item.addEventListener('click', () => {
+      const presetId = item.getAttribute('data-preset');
+      if (presetId) {
+        setChartResolutionPreset(presetId, scene);
+        if (resMenu) resMenu.classList.remove('active');
+      }
+    });
+  });
+
+  // Close resolution menu on outside click
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.card-resolution-section')) {
+      if (resMenu) resMenu.classList.remove('active');
+    }
+  });
+
   // Toggle 3D Chart Button
   const btnToggleSpline = document.getElementById('btn-toggle-spline');
   if (btnToggleSpline) {
@@ -803,7 +984,7 @@ function setupEventListeners() {
       if (getCurrentChart()) {
         removeCurrentChart(scene);
       } else if (selectedPlanetMesh) {
-        show3DSplineChart(selectedPlanetMesh, scene);
+        selectPlanet(selectedPlanetMesh);
       } else if (planetsGroup.children.length > 0) {
         const first = planetsGroup.children[0].userData?.primaryMesh || planetsGroup.children[0];
         selectPlanet(first);
@@ -818,6 +999,103 @@ function setupEventListeners() {
       const category = chip.getAttribute('data-category');
       applyCategoryFilter(category);
       soundFx.playSelectSound();
+    });
+  });
+
+  // Real-Time Stock Search Input & Suggestions
+  const searchInput = document.getElementById('stock-search-input');
+  const suggestionsBox = document.getElementById('stock-search-suggestions');
+  const btnClearSearch = document.getElementById('btn-clear-search');
+  let searchDebounceTimer = null;
+
+  if (searchInput && suggestionsBox) {
+    searchInput.addEventListener('input', (e) => {
+      const query = e.target.value;
+      if (btnClearSearch) {
+        btnClearSearch.style.display = query ? 'block' : 'none';
+      }
+
+      if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+      if (!query.trim()) {
+        suggestionsBox.innerHTML = '';
+        suggestionsBox.classList.remove('active');
+        return;
+      }
+
+      searchDebounceTimer = setTimeout(async () => {
+        const results = await searchTickers(query);
+        if (!results || results.length === 0) {
+          suggestionsBox.innerHTML = '<div class="suggestion-item"><span class="suggestion-desc">No tickers found</span></div>';
+          suggestionsBox.classList.add('active');
+          return;
+        }
+
+        suggestionsBox.innerHTML = results.map((item) => `
+          <div class="suggestion-item" data-symbol="${item.symbol}">
+            <div class="suggestion-left">
+              <span class="suggestion-ticker">${item.symbol}</span>
+              <span class="suggestion-desc">${item.description}</span>
+            </div>
+            <span class="suggestion-tag">${item.type || 'Stock'}</span>
+          </div>
+        `).join('');
+
+        suggestionsBox.classList.add('active');
+
+        suggestionsBox.querySelectorAll('.suggestion-item').forEach((itemElem) => {
+          itemElem.addEventListener('click', () => {
+            const sym = itemElem.getAttribute('data-symbol');
+            if (sym) {
+              searchInput.value = sym;
+              suggestionsBox.classList.remove('active');
+              const matchItem = results.find((r) => r.symbol === sym);
+              selectStockSymbol(sym, matchItem ? { symbol: sym, name: matchItem.description, exchange: matchItem.exchange || '' } : null);
+            }
+          });
+        });
+      }, 200);
+    });
+
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const query = searchInput.value.trim().toUpperCase();
+        if (query) {
+          suggestionsBox.classList.remove('active');
+          const matchCatalog = STOCK_CATALOG.find((s) => s.symbol === query) || INDIAN_STOCKS.find((s) => s.symbol === query);
+          selectStockSymbol(query, matchCatalog);
+        }
+      } else if (e.key === 'Escape') {
+        suggestionsBox.classList.remove('active');
+      }
+    });
+
+    if (btnClearSearch) {
+      btnClearSearch.addEventListener('click', () => {
+        searchInput.value = '';
+        btnClearSearch.style.display = 'none';
+        suggestionsBox.innerHTML = '';
+        suggestionsBox.classList.remove('active');
+      });
+    }
+
+    // Close suggestions on outside click
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.stock-search-box')) {
+        suggestionsBox.classList.remove('active');
+      }
+    });
+  }
+
+  // Quick Ticker Pills
+  document.querySelectorAll('.quick-ticker-pill').forEach((pill) => {
+    pill.addEventListener('click', () => {
+      const sym = pill.getAttribute('data-ticker');
+      if (sym) {
+        if (searchInput) searchInput.value = sym;
+        if (btnClearSearch) btnClearSearch.style.display = 'block';
+        const catalogStock = STOCK_CATALOG.find((s) => s.symbol === sym) || INDIAN_STOCKS.find((s) => s.symbol === sym);
+        selectStockSymbol(sym, catalogStock);
+      }
     });
   });
 
@@ -941,12 +1219,12 @@ function renderLoop(timestamp, frame) {
     const chart = getCurrentChart();
     if (chart) {
       chart.traverse((child) => {
-        if (child.userData?.isCloseButton || child.userData?.isChartModeToggle || child.userData?.isCandle) {
+        if (child.userData?.isCloseButton || child.userData?.isChartModeToggle || child.userData?.isCandle || child.userData?.isResolutionPreset || child.userData?.isVRButton || child.userData?.onClick || child.userData?.isInteractive) {
           interactiveObjects.push(child);
         }
       });
     }
-    xrManager.update(interactiveObjects);
+    xrManager.update(interactiveObjects, delta);
   }
 
   // 8. Render Frame (Bloom vs WebXR stereo direct)
