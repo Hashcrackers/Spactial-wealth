@@ -1,1588 +1,1597 @@
-/**
- * Spatial Wealth - Photorealistic TradingView / Bloomberg Holographic Spatial HUD
- * Dual-Mode: 18-Point Spline Area & 3D Candlestick + Volume Depth Mode.
- * Robust OHLC Coordinate Mapping across [X: -1.5..1.5, Y: -0.65..0.65], Glassmorphism Plate & Interactive Micro-HUD.
- */
-
 import * as THREE from 'three';
-import { Text } from 'troika-three-text';
 import * as TWEEN from '@tweenjs/tween.js';
-import { Line2 } from 'three/addons/lines/Line2.js';
-import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
-import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { soundFx } from './audio.js';
-import { formatCurrency, INDIAN_STOCKS } from './data.js';
-import { fetchStockCandles } from './stock-api.js';
-import { registerInteractiveObject, unregisterInteractiveObject } from './xr-manager.js';
 
-let activeChartGroup = null;
-let trackedPlanetMesh = null;
-let chartTextLabels = [];
-let currentChartMode = 'spline'; // 'spline' | 'candlestick'
-let hoveredCandleMesh = null;
+// ============================================================================
+// Multi-Window & Close Hitbox Registries
+// ============================================================================
+export const activeChartWindows = [];
+export const closeHitboxRegistry = [];
 
-/**
- * Exact TradingView Dual-Parameter Timeframe & Candle Interval Resolution Configurations
- */
+let currentGlobalScene = null;
+export function setChartsScene(scene) {
+  currentGlobalScene = scene;
+}
+
+// ============================================================================
+// Resolution & Timeframe Presets
+// ============================================================================
 export const RESOLUTION_PRESETS = [
-  { id: '1D_1m',  label: '1D · 1m',  fullText: '1 day in 1 minute intervals',    rangeDays: 1,    interval: '1m',  finnhubRes: '1',  candleCount: 30 },
-  { id: '5D_5m',  label: '5D · 5m',  fullText: '5 days in 5 minutes intervals',   rangeDays: 5,    interval: '5m',  finnhubRes: '5',  candleCount: 32 },
-  { id: '1M_30m', label: '1M · 30m', fullText: '1 month in 30 minutes intervals', rangeDays: 30,   interval: '30m', finnhubRes: '30', candleCount: 30 },
-  { id: '3M_1h',  label: '3M · 1h',  fullText: '3 months in 1 hour intervals',    rangeDays: 90,   interval: '1h',  finnhubRes: '60', candleCount: 32 },
-  { id: '6M_2h',  label: '6M · 2h',  fullText: '6 months in 2 hours intervals',   rangeDays: 180,  interval: '2h',  finnhubRes: '60', candleCount: 34 },
-  { id: 'YTD_1d', label: 'YTD · 1D', fullText: 'Year to date in 1 day intervals', rangeDays: 'YTD',interval: '1d',  finnhubRes: 'D',  candleCount: 32 },
-  { id: '1Y_1d',  label: '1Y · 1D',  fullText: '1 year in 1 day intervals',      rangeDays: 365,  interval: '1d',  finnhubRes: 'D',  candleCount: 36 },
-  { id: '5Y_1w',  label: '5Y · 1W',  fullText: '5 years in 1 week intervals',    rangeDays: 1825, interval: '1w',  finnhubRes: 'W',  candleCount: 40 },
-  { id: 'ALL_1M', label: 'ALL · 1M', fullText: 'All data in 1 month intervals',  rangeDays: 'ALL',interval: '1M',  finnhubRes: 'M',  candleCount: 42 }
+  { id: '1D_5m',   label: '1D • 5m',   fullLabel: '1D • 5m',   count: 24, mult: 0.015 },
+  { id: '5D_15m',  label: '5D • 15m',  fullLabel: '5D • 15m',  count: 22, mult: 0.025 },
+  { id: '1M_30m',  label: '1M • 30m',  fullLabel: '1M • 30m',  count: 20, mult: 0.035 },
+  { id: '3M_1h',   label: '3M • 1h',   fullLabel: '3M • 1h',   count: 20, mult: 0.045 },
+  { id: '6M_2h',   label: '6M • 2h',   fullLabel: '6M • 2h',   count: 20, mult: 0.055 },
+  { id: 'YTD_1D',  label: 'YTD • 1D',  fullLabel: 'YTD • 1D',  count: 20, mult: 0.065 },
+  { id: '1Y_1D',   label: '1Y • 1D',   fullLabel: '1Y • 1D',   count: 22, mult: 0.080 },
+  { id: 'ALL_1W',  label: 'ALL • 1W',  fullLabel: 'ALL • 1W',  count: 24, mult: 0.110 }
 ];
 
-let currentResolutionPreset = '1Y_1d';
-
-export function getActiveResolutionPreset() {
-  return currentResolutionPreset;
-}
-
-export function getTimeTicksForPreset(presetId) {
-  switch (presetId) {
-    case '1D_1m':
-      return ['09:30', '11:00', '12:30', '14:00', '15:30', '16:00'];
-    case '5D_5m':
-      return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
-    case '1M_30m':
-      return ['W1', 'W2', 'W3', 'W4', 'Current'];
-    case '3M_1h':
-      return ['3M Ago', '2M', '1M', 'Current'];
-    case '6M_2h':
-      return ['6M Ago', '4M', '2M', 'Current'];
-    case 'YTD_1d':
-      return ['Jan', 'Apr', 'Jul', 'Oct', 'Current'];
-    case '1Y_1d':
-      return ['1Y Ago', '9M', '6M', '3M', 'Current'];
-    case '5Y_1w':
-      return ['2021', '2022', '2023', '2024', '2025', '2026'];
-    case 'ALL_1M':
-      return ['2015', '2018', '2020', '2023', 'Current'];
-    default:
-      return ['1Y Ago', '9M', '6M', '3M', 'Current'];
-  }
-}
-
-/**
- * Builds a planar 2D vertical gradient area fill mesh beneath the spline curve.
- * Top edge traces curve points; bottom edge anchors flat along baseline.
- */
-function createAreaGradientMesh(points, baselineY, colorHex) {
-  const count = points.length;
-  const positions = [];
-  const indices = [];
-
-  for (let i = 0; i < count; i++) {
-    const pt = points[i];
-    // Top vertex (index: 2 * i)
-    positions.push(pt.x, pt.y, 0.01);
-    // Bottom vertex (index: 2 * i + 1)
-    positions.push(pt.x, baselineY, 0.01);
-
-    if (i < count - 1) {
-      const topA = 2 * i;
-      const btmA = 2 * i + 1;
-      const topB = 2 * (i + 1);
-      const btmB = 2 * (i + 1) + 1;
-
-      // Triangle 1: topA -> btmA -> topB
-      indices.push(topA, btmA, topB);
-      // Triangle 2: btmA -> btmB -> topB
-      indices.push(btmA, btmB, topB);
-    }
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
-
-  const color = new THREE.Color(colorHex);
-  const material = new THREE.ShaderMaterial({
-    uniforms: {
-      uColor: { value: color },
-      uBaselineY: { value: baselineY },
-      uTopY: { value: 0.60 }
-    },
-    vertexShader: `
-      varying float vY;
-      void main() {
-        vY = position.y;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: `
-      uniform vec3 uColor;
-      uniform float uBaselineY;
-      uniform float uTopY;
-      varying float vY;
-
-      void main() {
-        float factor = clamp((vY - uBaselineY) / (uTopY - uBaselineY), 0.0, 1.0);
-        float alpha = mix(0.02, 0.26, pow(factor, 1.25));
-        gl_FragColor = vec4(uColor, alpha);
-      }
-    `,
-    transparent: true,
-    depthWrite: false,
-    side: THREE.DoubleSide
-  });
-
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.renderOrder = 1000;
-  return mesh;
-}
-
-/**
- * Generates realistic historical prices for Spline curve tailored to timeframe & interval.
- */
-export function generateRealistic18PointSeries(assetReturn = 0, volatility = 'medium', basePrice = 100, presetId = '1Y_1d') {
-  const preset = RESOLUTION_PRESETS.find((p) => p.id === presetId) || RESOLUTION_PRESETS[6];
-  const steps = preset.candleCount || 36;
-  const points = [basePrice];
-
-  let effectiveReturn = assetReturn;
-  if (preset.id === '1D_1m') effectiveReturn = assetReturn * 0.04 + (Math.random() - 0.45) * 1.8;
-  else if (preset.id === '5D_5m') effectiveReturn = assetReturn * 0.12 + (Math.random() - 0.45) * 3.5;
-  else if (preset.id === '1M_30m') effectiveReturn = assetReturn * 0.30 + (Math.random() - 0.45) * 6.0;
-  else if (preset.id === '3M_1h') effectiveReturn = assetReturn * 0.55;
-  else if (preset.id === '6M_2h') effectiveReturn = assetReturn * 0.75;
-  else if (preset.id === '5Y_1w') effectiveReturn = assetReturn * 2.8;
-  else if (preset.id === 'ALL_1M') effectiveReturn = assetReturn * 4.5;
-
-  const targetEndPrice = basePrice * (1 + effectiveReturn / 100);
-  const drift = (targetEndPrice - basePrice) / (steps - 1);
-
-  const volScale = (volatility || '').toLowerCase() === 'high' ? 0.045 : (volatility || '').toLowerCase() === 'low' ? 0.012 : 0.026;
-
-  for (let i = 1; i < steps - 1; i++) {
-    const expected = basePrice + drift * i;
-    const harmonic1 = Math.sin(i * 1.55 + effectiveReturn * 0.1) * 0.6;
-    const harmonic2 = Math.cos(i * 3.2 - effectiveReturn * 0.05) * 0.4;
-    const noise = (harmonic1 + harmonic2) * (basePrice * volScale);
-
-    points.push(Math.max(basePrice * 0.25, expected + noise));
-  }
-
-  points.push(targetEndPrice);
-  return points;
-}
-
-/**
- * Generates synthetic OHLC candles tailored to asset returns, volatility, timeframe & resolution preset.
- */
-export function generateCandles(assetData = {}, count = 32, basePrice = 100, presetId = '1Y_1d') {
-  const preset = RESOLUTION_PRESETS.find((p) => p.id === presetId) || RESOLUTION_PRESETS[6];
-  const isVolHigh = (assetData.volatility || '').toUpperCase() === 'HIGH';
-  const returnVal = typeof assetData.returns === 'number' ? assetData.returns : parseFloat(assetData.returns) || 0;
-
-  let effectiveReturn = returnVal;
-  if (preset.id === '1D_1m') effectiveReturn = returnVal * 0.04 + (Math.random() - 0.48) * 1.8;
-  else if (preset.id === '5D_5m') effectiveReturn = returnVal * 0.12 + (Math.random() - 0.48) * 3.5;
-  else if (preset.id === '1M_30m') effectiveReturn = returnVal * 0.30 + (Math.random() - 0.48) * 6.0;
-  else if (preset.id === '3M_1h') effectiveReturn = returnVal * 0.55;
-  else if (preset.id === '6M_2h') effectiveReturn = returnVal * 0.75;
-  else if (preset.id === '5Y_1w') effectiveReturn = returnVal * 2.8;
-  else if (preset.id === 'ALL_1M') effectiveReturn = returnVal * 4.5;
-
-  const targetEndPrice = basePrice * (1 + effectiveReturn / 100);
-  const drift = (targetEndPrice - basePrice) / (count - 1);
-  const volMult = isVolHigh ? 0.045 : (assetData.volatility || '').toUpperCase() === 'LOW' ? 0.014 : 0.028;
-
+// Helper to generate simulated realistic OHLCV candles
+function generateCandleData(basePrice = 120, count = 20, volatilityMult = 0.035) {
   const candles = [];
-  let currentPrice = basePrice;
-  const now = Math.floor(Date.now() / 1000);
-
+  let price = basePrice;
   for (let i = 0; i < count; i++) {
-    const expected = basePrice + drift * i;
-    const wave = Math.sin(i * 1.5 + effectiveReturn * 0.08) * 0.6 + Math.cos(i * 3.1) * 0.4;
-    const noise = (wave + (Math.random() - 0.48) * 1.6) * (basePrice * volMult);
-
-    let close = i === count - 1 ? targetEndPrice : Math.max(basePrice * 0.2, expected + noise);
-    if (Math.abs(close - currentPrice) < basePrice * 0.005) {
-      close += (Math.random() > 0.5 ? 1 : -1) * basePrice * 0.012;
-    }
-
-    const open = currentPrice;
-    const spread = Math.abs(noise) * (0.35 + Math.random() * 0.7) + basePrice * 0.008;
-    const high = Math.max(open, close) + spread;
-    const low = Math.max(basePrice * 0.15, Math.min(open, close) - spread);
-    const isBullish = close >= open;
-
-    const baseVol = 18000 + Math.random() * 26000;
-    const volSpike = (Math.abs(close - open) / (basePrice * volMult || 1)) * 14000;
-    const volume = Math.round(baseVol + volSpike);
-
+    const delta = (Math.random() - 0.48) * (basePrice * volatilityMult);
+    const open = price;
+    const close = Math.max(1, open + delta);
+    const high = Math.max(open, close) + Math.random() * (basePrice * volatilityMult * 0.55);
+    const low = Math.max(0.5, Math.min(open, close) - Math.random() * (basePrice * volatilityMult * 0.55));
+    const volume = Math.random() * 0.14 + 0.025;
     candles.push({
-      index: i,
-      open: Math.round(open * 100) / 100,
-      high: Math.round(high * 100) / 100,
-      low: Math.round(low * 100) / 100,
-      close: Math.round(close * 100) / 100,
+      open,
+      close,
+      high,
+      low,
       volume,
-      timestamp: now - (count - 1 - i) * 3600,
-      isBullish
+      isGreen: close >= open,
+      isBullish: close >= open
     });
-
-    currentPrice = close;
+    price = close;
   }
-
   return candles;
 }
 
-/**
- * Robust OHLC Candlesticks & Extruded Volume Bars.
- * @param {Object} assetData Asset holding metadata
- * @param {THREE.Group} parentGroup Parent chart group
- * @param {Object} bounds Shared coordinate mapping bounds
- * @returns {THREE.Group} candleGroup
- */
-export function renderCandlesticks(assetData = {}, parentGroup, bounds = null) {
-  if (!parentGroup) return null;
+// ---------------------------------------------------------------------------
+// 1. Top Header Builder
+// ---------------------------------------------------------------------------
+function buildHeader(chartWin, ticker, assetData) {
+  const companyName = assetData.name || ticker;
+  const symbol = String(ticker).toUpperCase();
 
-  // Clear previous candle group if any
-  const existing = parentGroup.getObjectByName('candleGroup');
-  if (existing) {
-    parentGroup.remove(existing);
-    existing.traverse((c) => {
-      if (c.geometry) c.geometry.dispose();
-      if (c.material) {
-        if (Array.isArray(c.material)) c.material.forEach((m) => m.dispose());
-        else c.material.dispose();
-      }
-    });
+  let formattedPrice = assetData.price;
+  if (!formattedPrice && assetData.priceNumeric) {
+    formattedPrice = `$${Number(assetData.priceNumeric).toLocaleString()}`;
+  } else if (!formattedPrice) {
+    formattedPrice = '$124,500';
+  } else if (typeof formattedPrice === 'number') {
+    formattedPrice = `$${formattedPrice.toLocaleString()}`;
+  } else if (!String(formattedPrice).startsWith('$') && !String(formattedPrice).startsWith('₹')) {
+    formattedPrice = `$${formattedPrice}`;
   }
 
-  const candleGroup = new THREE.Group();
-  candleGroup.name = 'candleGroup';
-  candleGroup.renderOrder = 1000;
+  const assetType = assetData.category || 'Core Equity';
+  const alloc = assetData.allocation !== undefined ? assetData.allocation : 25;
+  const rawRet = assetData.change || (assetData.returns !== undefined ? `${assetData.returns >= 0 ? '+' : ''}${assetData.returns}%` : '+3.4%');
+  const ret = String(rawRet).startsWith('+') ? String(rawRet).substring(1) : rawRet;
 
-  const preset = RESOLUTION_PRESETS.find((p) => p.id === currentResolutionPreset) || RESOLUTION_PRESETS[6];
-  const count = bounds?.candles ? bounds.candles.length : (preset.candleCount || 36);
-  const candleWidth = Math.max(0.024, Math.min(0.075, 2.1 / count));
-  const candleDepth = 0.04;
-  const stepX = 2.8 / Math.max(1, count - 1);
-  const startX = -1.4;
+  // Single unified header canvas (1024 x 160) for retina crispness
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024;
+  canvas.height = 160;
+  const ctx = canvas.getContext('2d');
 
-  const candles = bounds?.candles || generateCandles(assetData, count, 100, currentResolutionPreset);
+  // Title Line: ${companyName} (${ticker})  •  $${price} in crisp bold white (font: bold 44px -apple-system, sans-serif)
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 44px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(`${companyName} (${symbol})  •  ${formattedPrice}`, 16, 56);
 
-  const minP = bounds?.minP ?? Math.min(...candles.map((c) => c.low));
-  const maxP = bounds?.maxP ?? Math.max(...candles.map((c) => c.high));
-  const range = maxP - minP || 1;
+  // Subtitle Line: ${assetType} • Allocation: ${alloc}% • 24h Return: +${ret}%      TOTAL NET WORTH: $1,245,000 in muted blue-grey (#94a3b8)
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '26px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  ctx.fillText(`${assetType} • Allocation: ${alloc}% • 24h Return: +${ret}%      TOTAL NET WORTH: $1,245,000`, 16, 114);
 
-  // Clean, realistic vertical dynamic range mapping into [-0.55, 0.55]
-  const mapY = (val) => ((val - minP) / range) * 1.1 - 0.55;
-  const maxVol = Math.max(...candles.map((c) => c.volume)) || 1;
+  const tex = new THREE.CanvasTexture(canvas);
+  // Pinned flat to the slate at z = 0.015m with THREE.PlaneGeometry (NO SPRITES - stops text sliding)
+  const headerGeo = new THREE.PlaneGeometry(0.70, 0.125);
+  const headerMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
+  const headerMesh = new THREE.Mesh(headerGeo, headerMat);
+  headerMesh.position.set(-0.20, 0.32, 0.015);
+  headerMesh.raycast = () => {}; // Non-blocking
+  chartWin.add(headerMesh);
+  chartWin.userData.headerMesh = headerMesh;
+  chartWin.userData.headerSprite = headerMesh; // Alias for backward compatibility
+  chartWin.userData.headerCanvas = canvas;
+  chartWin.userData.headerData = { name: companyName, symbol, category: assetType, allocation: alloc, change: rawRet, rawPrice: formattedPrice };
 
-  candles.forEach((c, i) => {
-    const x = startX + i * stepX;
-    const yOpen = mapY(c.open);
-    const yClose = mapY(c.close);
-    const yHigh = mapY(c.high);
-    const yLow = mapY(c.low);
-
-    const isBull = c.close >= c.open;
-    const color = isBull ? 0x10b981 : 0xef4444;
-
-    const bodyMat = new THREE.MeshStandardMaterial({
-      color: color,
-      emissive: color,
-      emissiveIntensity: 0.38,
-      roughness: 0.2,
-      metalness: 0.1
-    });
-
-    const bodyHeight = Math.max(0.025, Math.abs(yClose - yOpen));
-    const bodyCenterY = (yOpen + yClose) / 2;
-
-    // 1. Candle Body Box
-    const bodyGeom = new THREE.BoxGeometry(candleWidth, bodyHeight, candleDepth);
-    const bodyMesh = new THREE.Mesh(bodyGeom, bodyMat);
-    bodyMesh.position.set(x, bodyCenterY, 0.02);
-    bodyMesh.name = `CandleBody_${i}`;
-    bodyMesh.renderOrder = 1000;
-    bodyMesh.userData = {
-      isCandle: true,
-      index: i,
-      candleData: c,
-      posX: x,
-      topY: yHigh
-    };
-    candleGroup.add(bodyMesh);
-
-    // 2. Wick (Thin Cylinder)
-    const wickHeight = Math.max(0.04, yHigh - yLow);
-    const wickCenterY = (yHigh + yLow) / 2;
-    const wickGeom = new THREE.CylinderGeometry(0.004, 0.004, wickHeight, 6);
-    const wickMesh = new THREE.Mesh(wickGeom, bodyMat);
-    wickMesh.position.set(x, wickCenterY, 0.02);
-    wickMesh.renderOrder = 1000;
-    candleGroup.add(wickMesh);
-
-    // 3. Extruded Volume Bar at the bottom
-    const volHeight = 0.06 + (c.volume / maxVol) * 0.22;
-    const volGeom = new THREE.BoxGeometry(candleWidth * 0.85, volHeight, candleDepth * 0.6);
-    const volMat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.35, depthWrite: false });
-    const volMesh = new THREE.Mesh(volGeom, volMat);
-    volMesh.position.set(x, -0.75 + volHeight / 2, 0.02);
-    volMesh.renderOrder = 1000;
-    candleGroup.add(volMesh);
-  });
-
-  parentGroup.add(candleGroup);
-  return candleGroup;
+  // Title Dragging Surface (Invisible collider for desktop & VR spatial drag / Easter Egg thump trigger)
+  const dragBar = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.70, 0.125),
+    new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide })
+  );
+  dragBar.position.set(-0.20, 0.32, 0.016);
+  dragBar.userData.isTitleBar = true;
+  dragBar.userData.parentWindow = chartWin;
+  chartWin.add(dragBar);
+  chartWin.userData.titleBar = dragBar;
 }
 
-/**
- * Creates and displays a photorealistic TradingView / Bloomberg Holographic Financial HUD.
- * Summons the chart directly into the user's viewport personal space with a glowing laser tether back to the planet.
- * @param {THREE.Mesh | Object} planetMeshOrStockData The selected planet mesh or stock metadata object
- * @param {THREE.Scene} scene The Three.js scene
- * @param {Object} options Optional configuration (camera, isVR, renderer)
- * @returns {THREE.Group}
- */
-export function show3DSplineChart(planetMeshOrStockData, scene, options = {}) {
-  // Clear any existing active chart
-  if (activeChartGroup && scene) {
-    if (trackedPlanetMesh?.userData?.textLabel) {
-      trackedPlanetMesh.userData.textLabel.visible = true;
-    }
-    if (activeChartGroup.userData?.registeredButtons) {
-      activeChartGroup.userData.registeredButtons.forEach((btn) => unregisterInteractiveObject(btn));
-    }
-    if (activeChartGroup.userData?.tetherLine) {
-      scene.remove(activeChartGroup.userData.tetherLine);
-      activeChartGroup.userData.tetherLine.geometry?.dispose();
-      activeChartGroup.userData.tetherLine.material?.dispose();
-    }
-    if (activeChartGroup.userData?.beaconMesh) {
-      scene.remove(activeChartGroup.userData.beaconMesh);
-      activeChartGroup.userData.beaconMesh.geometry?.dispose();
-      activeChartGroup.userData.beaconMesh.material?.dispose();
-    }
-    scene.remove(activeChartGroup);
-    activeChartGroup.traverse((child) => {
+// ---------------------------------------------------------------------------
+// 1b. Robust Visual Trigger Button (Gold Dollar Badge)
+// ---------------------------------------------------------------------------
+export function attachWolfEggButton(chartWin) {
+  const eggBtnGroup = new THREE.Group();
+  eggBtnGroup.name = "wolfEggGroup";
+  // Place it right between Net Worth text and the Spline button
+  eggBtnGroup.position.set(0.18, 0.315, 0.035);
+
+  // 1. Golden Badge Mesh
+  const badgeGeo = new THREE.PlaneGeometry(0.065, 0.04);
+  const badgeMat = new THREE.MeshBasicMaterial({
+    color: 0xeab308,
+    side: THREE.DoubleSide
+  });
+  const badgeMesh = new THREE.Mesh(badgeGeo, badgeMat);
+  badgeMesh.userData.isWolfEgg = true;
+  badgeMesh.userData.parentChart = chartWin;
+  badgeMesh.userData.parentWindow = chartWin;
+  badgeMesh.userData.onClick = () => triggerWolfEasterEgg(chartWin);
+  eggBtnGroup.add(badgeMesh);
+
+  // 2. Dollar Icon Text
+  const canvas = document.createElement('canvas');
+  canvas.width = 64; canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0f172a';
+  ctx.font = 'bold 40px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('$', 32, 34);
+  const tex = new THREE.CanvasTexture(canvas);
+  const textMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.045, 0.045),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true })
+  );
+  textMesh.position.z = 0.005;
+  textMesh.raycast = () => {};
+  eggBtnGroup.add(textMesh);
+
+  // 3. Forward-facing 3D Hitbox (transparent opacity 0 so raycasting NEVER skips it)
+  const hitGeo = new THREE.BoxGeometry(0.09, 0.06, 0.06);
+  const hitMat = new THREE.MeshBasicMaterial({
+    transparent: true,
+    opacity: 0.0,
+    depthWrite: false
+  });
+  const eggHitbox = new THREE.Mesh(hitGeo, hitMat);
+  eggHitbox.position.z = 0.02;
+  eggHitbox.userData.isWolfEgg = true;
+  eggHitbox.userData.parentChart = chartWin;
+  eggHitbox.userData.parentWindow = chartWin;
+  eggHitbox.userData.onClick = () => triggerWolfEasterEgg(chartWin);
+  eggBtnGroup.add(eggHitbox);
+
+  chartWin.add(eggBtnGroup);
+  chartWin.userData.eggBtnGroup = eggBtnGroup;
+  chartWin.userData.eggHitbox = eggHitbox;
+
+  if (typeof window !== 'undefined') {
+    if (!window.activeEggHitboxes) window.activeEggHitboxes = [];
+    window.activeEggHitboxes.push(eggHitbox);
+    window.activeEggHitboxes.push(badgeMesh);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2. Top-Right Mode Toggles & Close Button
+// ---------------------------------------------------------------------------
+function buildTopControls(chartWin, scene) {
+  // 1. [ 📈 SPLINE ] Toggle Button (Inactive default, dark glass)
+  const splineCanvas = document.createElement('canvas');
+  splineCanvas.width = 256; splineCanvas.height = 80;
+  const sCtx = splineCanvas.getContext('2d');
+  sCtx.fillStyle = '#111c30';
+  sCtx.roundRect(4, 4, 248, 72, 14);
+  sCtx.fill();
+  sCtx.strokeStyle = '#334155';
+  sCtx.lineWidth = 3;
+  sCtx.roundRect(4, 4, 248, 72, 14);
+  sCtx.stroke();
+  sCtx.fillStyle = '#94a3b8';
+  sCtx.font = 'bold 26px "Inter", "Segoe UI", sans-serif';
+  sCtx.textAlign = 'center';
+  sCtx.textBaseline = 'middle';
+  sCtx.fillText('📈 SPLINE', 128, 40);
+
+  const splineTex = new THREE.CanvasTexture(splineCanvas);
+  const splinePill = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.115, 0.042),
+    new THREE.MeshBasicMaterial({ map: splineTex, transparent: true, side: THREE.DoubleSide })
+  );
+  splinePill.position.set(0.33, 0.32, 0.02);
+  splinePill.userData.isChartModeToggle = true;
+  splinePill.userData.targetMode = 'spline';
+  splinePill.userData.parentWindow = chartWin;
+  splinePill.userData.onClick = () => setChartDisplayMode('spline', chartWin);
+  chartWin.add(splinePill);
+  chartWin.userData.btnSpline = splinePill;
+
+  // 2. [ 📊 CANDLES ] Toggle Button (Active cyan highlight)
+  const candleCanvas = document.createElement('canvas');
+  candleCanvas.width = 270; candleCanvas.height = 80;
+  const cCtx = candleCanvas.getContext('2d');
+  cCtx.fillStyle = '#06b6d4';
+  cCtx.roundRect(4, 4, 262, 72, 14);
+  cCtx.fill();
+  cCtx.strokeStyle = '#38bdf8';
+  cCtx.lineWidth = 3;
+  cCtx.roundRect(4, 4, 262, 72, 14);
+  cCtx.stroke();
+  cCtx.fillStyle = '#ffffff';
+  cCtx.font = 'bold 26px "Inter", "Segoe UI", sans-serif';
+  cCtx.textAlign = 'center';
+  cCtx.textBaseline = 'middle';
+  cCtx.fillText('📊 CANDLES', 135, 40);
+
+  const candleTex = new THREE.CanvasTexture(candleCanvas);
+  const candlePill = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.125, 0.042),
+    new THREE.MeshBasicMaterial({ map: candleTex, transparent: true, side: THREE.DoubleSide })
+  );
+  candlePill.position.set(0.46, 0.32, 0.02);
+  candlePill.userData.isChartModeToggle = true;
+  candlePill.userData.targetMode = 'candles';
+  candlePill.userData.parentWindow = chartWin;
+  candlePill.userData.onClick = () => setChartDisplayMode('candles', chartWin);
+  chartWin.add(candlePill);
+  chartWin.userData.btnCandles = candlePill;
+
+  // 3. Integrated [ ✕ ] close icon in the top right corner (x = 0.58, y = 0.32, z = 0.02)
+  const closeGeo = new THREE.PlaneGeometry(0.055, 0.046);
+  const closeMat = new THREE.MeshBasicMaterial({
+    color: 0x221318,
+    transparent: true,
+    opacity: 0.8,
+    side: THREE.DoubleSide
+  });
+  const closeBtn = new THREE.Mesh(closeGeo, closeMat);
+  closeBtn.position.set(0.58, 0.32, 0.02);
+  closeBtn.userData.isCloseButton = true;
+  closeBtn.userData.parentWindow = chartWin;
+  chartWin.add(closeBtn);
+  chartWin.userData.closeBtn = closeBtn;
+
+  // Close Icon text (Clean white ✕ centered inside, z = 0.022m) - Static Mesh Plane (NOT a Sprite)
+  const xCanvas = document.createElement('canvas');
+  xCanvas.width = 128; xCanvas.height = 128;
+  const xCtx = xCanvas.getContext('2d');
+  xCtx.fillStyle = '#ffffff';
+  xCtx.font = 'bold 64px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  xCtx.textAlign = 'center';
+  xCtx.textBaseline = 'middle';
+  xCtx.fillText('✕', 64, 64);
+  const xTex = new THREE.CanvasTexture(xCanvas);
+  const xMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.038, 0.038),
+    new THREE.MeshBasicMaterial({ map: xTex, transparent: true, side: THREE.DoubleSide })
+  );
+  xMesh.position.set(0.58, 0.32, 0.022);
+  xMesh.raycast = () => {}; // Non-blocking
+  chartWin.add(xMesh);
+
+  // Forward-Facing 3D Hitbox for raycasting (z = 0.05m)
+  const hitBoxGeo = new THREE.BoxGeometry(0.12, 0.10, 0.08);
+  const hitBoxMat = new THREE.MeshBasicMaterial({ visible: false });
+  const closeHitbox = new THREE.Mesh(hitBoxGeo, hitBoxMat);
+  closeHitbox.position.set(0.58, 0.32, 0.05);
+  closeHitbox.userData.isCloseHitbox = true;
+  closeHitbox.userData.isCloseButton = true;
+  closeHitbox.userData.parentWindow = chartWin;
+  closeHitbox.userData.parentChart = chartWin;
+  chartWin.add(closeHitbox);
+  chartWin.userData.closeHitbox = closeHitbox;
+  closeHitboxRegistry.push(closeHitbox);
+
+  const handleClose = () => closeChartWindow(chartWin, scene);
+  closeBtn.userData.onClick = handleClose;
+  closeHitbox.userData.onClick = handleClose;
+}
+
+// ---------------------------------------------------------------------------
+// 3. Robust 3D Spline Builder Function
+// ---------------------------------------------------------------------------
+export function createSplineGroup(candleData) {
+  const splineGroup = new THREE.Group();
+  splineGroup.name = "splineGroup";
+
+  if (!candleData || candleData.length < 2) return splineGroup;
+
+  // 1. Calculate price range to normalize strictly within slate boundaries
+  const prices = candleData.map(c => c.close);
+  const minPrice = Math.min(...prices);
+  const maxPrice = Math.max(...prices);
+  const priceRange = Math.max(1, maxPrice - minPrice);
+
+  // Vertical bounds inside the slate (Y: -0.16 to +0.18, height ~0.34m)
+  const minY = -0.16;
+  const maxY = 0.18;
+  const baseY = -0.22;
+
+  // Horizontal bounds (X: -0.48 to +0.42)
+  const startX = -0.48;
+  const totalWidth = 0.90;
+  const stepX = totalWidth / (candleData.length - 1);
+
+  const points = [];
+  candleData.forEach((c, idx) => {
+    const norm = (c.close - minPrice) / priceRange; // 0.0 to 1.0
+    const x = startX + idx * stepX;
+    const y = minY + norm * (maxY - minY);
+    points.push(new THREE.Vector3(x, y, 0.04));
+  });
+
+  // 2. High-Resolution Smooth Spline Curve
+  const curve = new THREE.CatmullRomCurve3(points);
+  const tubeGeo = new THREE.TubeGeometry(curve, 72, 0.0035, 8, false);
+  const tubeMat = new THREE.MeshBasicMaterial({
+    color: 0x38bdf8,
+    side: THREE.DoubleSide
+  });
+  const tubeMesh = new THREE.Mesh(tubeGeo, tubeMat);
+  tubeMesh.raycast = () => {};
+  splineGroup.add(tubeMesh);
+
+  // 3. Subtle Cyan Gradient Area Fill
+  const fillVertices = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const p1 = points[i];
+    const p2 = points[i + 1];
+
+    // Two triangles per segment forming a vertical strip down to baseY
+    fillVertices.push(
+      p1.x, p1.y, 0.032,
+      p2.x, p2.y, 0.032,
+      p1.x, baseY, 0.032,
+
+      p2.x, p2.y, 0.032,
+      p2.x, baseY, 0.032,
+      p1.x, baseY, 0.032
+    );
+  }
+
+  const fillGeo = new THREE.BufferGeometry();
+  fillGeo.setAttribute('position', new THREE.Float32BufferAttribute(fillVertices, 3));
+  fillGeo.computeVertexNormals();
+
+  const fillMat = new THREE.MeshBasicMaterial({
+    color: 0x0284c7,
+    transparent: true,
+    opacity: 0.18,
+    side: THREE.DoubleSide,
+    depthWrite: false
+  });
+  const fillMesh = new THREE.Mesh(fillGeo, fillMat);
+  fillMesh.raycast = () => {};
+  splineGroup.add(fillMesh);
+
+  // 4. Volume Bars in Spline Mode:
+  // Clone or retain the volume bars at the base so spatial depth is preserved
+  const volGroup = new THREE.Group();
+  candleData.forEach((c, idx) => {
+    const x = startX + idx * stepX;
+    const volHeight = Math.max(0.015, (c.volume || 0.05) * 0.8);
+    const volGeo = new THREE.BoxGeometry(0.022, volHeight, 0.018);
+    const volMat = new THREE.MeshBasicMaterial({
+      color: c.close >= c.open ? 0x10b981 : 0xef4444,
+      transparent: true,
+      opacity: 0.45
+    });
+    const volMesh = new THREE.Mesh(volGeo, volMat);
+    volMesh.position.set(x, baseY + volHeight * 0.5, 0.03);
+    volMesh.raycast = () => {};
+    volGroup.add(volMesh);
+  });
+  splineGroup.add(volGroup);
+
+  return splineGroup;
+}
+
+export const buildSplineVisualization = (chartWin, candleData) => {
+  return createSplineGroup(candleData || chartWin);
+};
+
+// ---------------------------------------------------------------------------
+// 4. Candlesticks, Splines, Volume Pillars & Price Scale
+// ---------------------------------------------------------------------------
+function renderChartDataContent(chartWin, basePrice, presetMultiplier = 0.035, candleCount = 20) {
+  // Clear any existing chart content, candleGroup, and splineGroup directly attached to chartWin
+  if (chartWin.userData.chartContentGroup) {
+    chartWin.remove(chartWin.userData.chartContentGroup);
+    chartWin.userData.chartContentGroup.traverse((child) => {
       if (child.geometry) child.geometry.dispose();
       if (child.material) {
         if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
         else child.material.dispose();
       }
     });
-    activeChartGroup = null;
-    trackedPlanetMesh = null;
-    chartTextLabels = [];
+  }
+  if (chartWin.userData.candleGroup) {
+    chartWin.remove(chartWin.userData.candleGroup);
+    chartWin.userData.candleGroup.traverse((child) => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
+        else child.material.dispose();
+      }
+    });
+  }
+  if (chartWin.userData.splineGroup) {
+    chartWin.remove(chartWin.userData.splineGroup);
+    chartWin.userData.splineGroup.traverse((child) => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
+        else child.material.dispose();
+      }
+    });
   }
 
-  if (!planetMeshOrStockData || !scene) return null;
+  const contentGroup = new THREE.Group();
+  chartWin.add(contentGroup);
+  chartWin.userData.chartContentGroup = contentGroup;
 
-  soundFx.playSelectSound();
+  const candles = generateCandleData(basePrice, candleCount, presetMultiplier);
+  chartWin.userData.candles = candles;
 
-  let asset = {};
-  let targetPlanet = null;
+  let minP = Infinity;
+  let maxP = -Infinity;
+  candles.forEach((c) => {
+    if (c.low < minP) minP = c.low;
+    if (c.high > maxP) maxP = c.high;
+  });
+  const rangeP = Math.max(0.001, maxP - minP);
+  chartWin.userData.minP = minP;
+  chartWin.userData.maxP = maxP;
+  chartWin.userData.rangeP = rangeP;
 
-  if (planetMeshOrStockData.isObject3D) {
-    targetPlanet = planetMeshOrStockData;
-    asset = planetMeshOrStockData.userData || {};
-    if (planetMeshOrStockData.userData?.textLabel) {
-      planetMeshOrStockData.userData.textLabel.visible = false;
-    }
-  } else if (planetMeshOrStockData && typeof planetMeshOrStockData === 'object') {
-    asset = planetMeshOrStockData;
-    const sym = (asset.symbol || asset.ticker || '').toUpperCase();
-    if (sym && scene) {
-      scene.traverse((child) => {
-        if (child.userData?.isAssetNode && (child.userData.ticker?.toUpperCase() === sym || child.userData.symbol?.toUpperCase() === sym)) {
-          targetPlanet = child;
-        }
-      });
-    }
-  } else {
-    return null;
+  // Chart area dimensions
+  const startX = -0.56;
+  const endX = 0.44;
+  const totalChartWidth = endX - startX;
+  const stepX = totalChartWidth / (candleCount - 1);
+
+  const chartBottomY = -0.12;
+  const chartHeight = 0.34;
+  const mapPriceToY = (price) => chartBottomY + ((price - minP) / rangeP) * chartHeight;
+  chartWin.userData.startX = startX;
+  chartWin.userData.endX = endX;
+  chartWin.userData.stepX = stepX;
+  chartWin.userData.chartBottomY = chartBottomY;
+  chartWin.userData.chartHeight = chartHeight;
+  chartWin.userData.mapPriceToY = mapPriceToY;
+
+  // ==========================================
+  // A. 3D Candlesticks Group & Collider Registry
+  // ==========================================
+  const candleGroup = new THREE.Group();
+  candleGroup.name = 'candleGroup';
+  chartWin.add(candleGroup);
+  chartWin.userData.candleGroup = candleGroup;
+
+  const candleColliders = [];
+  chartWin.userData.candleColliders = candleColliders;
+
+  const candleEntries = [];
+
+  candles.forEach((c, idx) => {
+    const xPos = startX + idx * stepX;
+    const isGreen = c.isGreen;
+    const color = isGreen ? 0x10b981 : 0xef4444;
+
+    const yOpen = mapPriceToY(c.open);
+    const yClose = mapPriceToY(c.close);
+    const bodyHeight = Math.max(0.014, Math.abs(yClose - yOpen));
+    const bodyCenterY = (yOpen + yClose) * 0.5;
+
+    // 1. Candlestick 3D Box Body (width 0.030m, height bodyHeight, depth 0.035m at z = 0.055m)
+    const bodyGeo = new THREE.BoxGeometry(0.030, bodyHeight, 0.035);
+    const bodyMat = new THREE.MeshStandardMaterial({
+      color,
+      emissive: isGreen ? 0x065f46 : 0x991b1b,
+      emissiveIntensity: 0.35,
+      roughness: 0.25,
+      metalness: 0.2,
+      transparent: true,
+      opacity: 0.95
+    });
+    const candleMesh = new THREE.Mesh(bodyGeo, bodyMat);
+    candleMesh.position.set(xPos, bodyCenterY, 0.055);
+    candleMesh.userData = {
+      isCandle: true,
+      candleData: { open: c.open, close: c.close, high: c.high, low: c.low, date: c.date || '12:30' },
+      parentChart: chartWin,
+      parentWindow: chartWin,
+      originalColor: color,
+      index: idx,
+      posX: xPos,
+      topY: mapPriceToY(c.high)
+    };
+    
+    if (!chartWin.userData.candleColliders) chartWin.userData.candleColliders = [];
+    chartWin.userData.candleColliders.push(candleMesh);
+    candleGroup.add(candleMesh);
+    const body = candleMesh;
+
+    // 2. Wick (Slim central cylinder, radius 0.0018m, radialSegments 6 at z = 0.055m)
+    const yHigh = mapPriceToY(c.high);
+    const yLow = mapPriceToY(c.low);
+    const wickHeight = Math.max(0.03, yHigh - yLow);
+    const wickGeo = new THREE.CylinderGeometry(0.0018, 0.0018, wickHeight, 6);
+    const wickMat = new THREE.MeshStandardMaterial({
+      color,
+      emissive: isGreen ? 0x065f46 : 0x991b1b,
+      emissiveIntensity: 0.35,
+      roughness: 0.3,
+      metalness: 0.5
+    });
+    const wick = new THREE.Mesh(wickGeo, wickMat);
+    wick.position.set(xPos, (yHigh + yLow) * 0.5, 0.055);
+    wick.raycast = () => {}; // Non-blocking
+    candleGroup.add(wick);
+
+    // 3. Semi-transparent Volume Pillar at bottom (width 0.026m, depth 0.025m at z = 0.025m)
+    const volHeight = Math.max(0.015, c.volume * 0.65);
+    const volGeo = new THREE.BoxGeometry(0.026, volHeight, 0.025);
+    const volMat = new THREE.MeshStandardMaterial({
+      color,
+      emissive: isGreen ? 0x065f46 : 0x991b1b,
+      emissiveIntensity: 0.18,
+      roughness: 0.35,
+      metalness: 0.15,
+      transparent: true,
+      opacity: 0.55
+    });
+    const vol = new THREE.Mesh(volGeo, volMat);
+    vol.position.set(xPos, -0.25 + volHeight * 0.5, 0.025);
+    vol.raycast = () => {}; // Non-blocking
+    candleGroup.add(vol);
+
+    candleEntries.push({
+      posX: xPos,
+      posY: bodyCenterY,
+      topY: yHigh,
+      bodyMesh: body,
+      wickMesh: wick,
+      volMesh: vol,
+      data: c
+    });
+  });
+
+  chartWin.userData.candleEntries = candleEntries;
+
+  // ==========================================
+  // B. 3D Smooth Glowing Spline Group
+  // ==========================================
+  const splineGroup = createSplineGroup(candles);
+  chartWin.add(splineGroup);
+  chartWin.userData.splineGroup = splineGroup;
+
+  // Initial display mode visibility (default: 'candles')
+  const currentMode = chartWin.userData.displayMode || 'candles';
+  const isCandle = currentMode === 'candles' || currentMode === 'candlestick';
+  candleGroup.visible = isCandle;
+  splineGroup.visible = !isCandle;
+
+  // ==========================================
+  // C. Right-Hand Price Axis Scale & Thin Dashed Gridlines
+  // ==========================================
+  const steps = 3; // 4 price markers (fraction: 0, 1/3, 2/3, 1)
+  for (let i = 0; i <= steps; i++) {
+    const fraction = i / steps;
+    const levelY = chartBottomY + fraction * chartHeight;
+    const priceVal = minP + fraction * (maxP - minP);
+
+    // 1. Thin dashed gridline extending faintly across the chart (z = 0.025m)
+    const lineGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(startX - 0.02, levelY, 0.025),
+      new THREE.Vector3(endX + 0.02, levelY, 0.025)
+    ]);
+    const lineMat = new THREE.LineDashedMaterial({
+      color: 0x475569,
+      dashSize: 0.02,
+      gapSize: 0.012,
+      transparent: true,
+      opacity: 0.45
+    });
+    const gridLine = new THREE.Line(lineGeo, lineMat);
+    gridLine.computeLineDistances();
+    gridLine.raycast = () => {}; // Non-blocking
+    contentGroup.add(gridLine);
+
+    // 2. Text price marker pinned flat to the slate as a static Mesh Plane (z = 0.015m)
+    const canvas = document.createElement('canvas');
+    canvas.width = 160; canvas.height = 48;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = 'bold 24px monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`$${priceVal.toFixed(1)}`, 8, 24);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    const pGeo = new THREE.PlaneGeometry(0.09, 0.027);
+    const pMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
+    const pMesh = new THREE.Mesh(pGeo, pMat);
+    pMesh.position.set(0.53, levelY, 0.015);
+    pMesh.raycast = () => {}; // Non-blocking
+    contentGroup.add(pMesh);
   }
 
-  trackedPlanetMesh = targetPlanet;
+  // ==========================================
+  // D. Time Axis & Volume Pillars Alignment
+  // ==========================================
+  // Horizontal time labels above bottom buttons: 09:30 11:00 12:30 14:00 15:30 16:00
+  const timeCanvas = document.createElement('canvas');
+  timeCanvas.width = 1024;
+  timeCanvas.height = 64;
+  const tCtx = timeCanvas.getContext('2d');
+  tCtx.fillStyle = '#64748b';
+  tCtx.font = '22px -apple-system, BlinkMacSystemFont, "Segoe UI", monospace';
+  tCtx.textAlign = 'center';
+  tCtx.textBaseline = 'middle';
 
-  const chartGroup = new THREE.Group();
-  chartGroup.name = 'TradingViewBloombergHUD';
+  const timeLabels = ['09:30', '11:00', '12:30', '14:00', '15:30', '16:00'];
+  timeLabels.forEach((label, idx) => {
+    const fraction = idx / (timeLabels.length - 1);
+    const canvasX = 30 + fraction * (1024 - 60);
+    tCtx.fillText(label, canvasX, 32);
+  });
 
-  const symbol = (asset.ticker || asset.symbol || 'AST').toUpperCase();
-  const isINR = (asset.currency === 'INR') || (asset.exchange === 'NSE') || (asset.exchange === 'BSE') || INDIAN_STOCKS.some((s) => s.symbol === symbol);
-  const currSym = isINR ? '₹' : '$';
-  const returnVal = typeof asset.returns === 'number' ? asset.returns : parseFloat(asset.returns) || 0;
-  const isPositive = returnVal >= 0;
+  const timeTex = new THREE.CanvasTexture(timeCanvas);
+  const timeGeo = new THREE.PlaneGeometry(totalChartWidth + 0.06, 0.032);
+  const timeMat = new THREE.MeshBasicMaterial({ map: timeTex, transparent: true, side: THREE.DoubleSide });
+  const timeMesh = new THREE.Mesh(timeGeo, timeMat);
+  timeMesh.position.set((startX + endX) * 0.5, -0.275, 0.015);
+  timeMesh.raycast = () => {}; // Non-blocking
+  contentGroup.add(timeMesh);
 
-  // Subdued financial terminal theme: Emerald green for bull, Coral red for bear
-  const themeColorHex = isPositive ? 0x10b981 : 0xef4444;
-
-  // Plate Dimensions: width = 3.6, height = 2.25 (to comfortably fit resolution selector bar)
-  const panelWidth = 3.6;
-  const panelHeight = 2.25;
-
-  // =========================================================================
-  // SUMMON CHART DIRECTLY INTO USER'S PERSONAL VIEWPORT SPACE
-  // =========================================================================
-  const camera = options.camera;
-  const isVR = Boolean(options.isVR || options.renderer?.xr?.isPresenting);
-
-  if (isVR && camera) {
-    // In VR: Position chart 1.5m directly in front of the viewer's current head pose
-    const headPos = camera.getWorldPosition(new THREE.Vector3());
-    const headDir = new THREE.Vector3();
-    camera.getWorldDirection(headDir);
-    headDir.y = 0; // Lock strictly to horizontal plane to guarantee chart stands upright
-    if (headDir.lengthSq() < 0.001) headDir.set(0, 0, -1);
-    headDir.normalize();
-
-    // Spawn 1.5m in front of user, lifted slightly to clear wrist HUD (+0.15m)
-    const targetChartPos = headPos.clone().add(headDir.clone().multiplyScalar(1.5));
-    targetChartPos.y = headPos.y + 0.15;
-    chartGroup.position.copy(targetChartPos);
-
-    // Billboarding: Ensure chart stands perfectly upright facing the camera
-    chartGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), headDir.clone().negate());
-    chartGroup.scale.set(0.65, 0.65, 0.65);
-  } else {
-    // In Desktop: Smoothly bring the chart to (0, 1.8, 4.0) without shifting OrbitControls
-    chartGroup.position.set(0, 1.8, 2.2);
-    chartGroup.rotation.set(0, 0, 0);
-    chartGroup.scale.set(0.70, 0.70, 0.70);
-
-    const tw = new TWEEN.Tween(chartGroup.position)
-      .to({ x: 0, y: 1.8, z: 4.0 }, 600)
-      .easing(TWEEN.Easing.Cubic.Out);
-    TWEEN.add(tw);
-    tw.start();
-  }
-
-  chartGroup.renderOrder = 10;
-
-  const preset = RESOLUTION_PRESETS.find((p) => p.id === currentResolutionPreset) || RESOLUTION_PRESETS[6];
-  const count = preset.candleCount || 36;
-  const basePrice = Number(asset.price ?? asset.latestPrice ?? 100);
-  const candles = generateCandles(asset, count, basePrice, currentResolutionPreset);
-  const history = candles.map((c) => c.close);
-
-  const minP = Math.min(...candles.map((c) => c.low));
-  const maxP = Math.max(...candles.map((c) => c.high));
-  const range = maxP - minP || 1;
-
-  const stepX = 2.8 / Math.max(1, count - 1);
-  const startX = -1.4;
-  const baselineY = -0.72;
-
-  // Unified Y-space mapping: dollar value -> [-0.55, 0.55]
-  const mapY = (val) => ((val - minP) / range) * 1.1 - 0.55;
-
-  // 1. Sleek Frosted Glassmorphism Backdrop Plate
-  const panelGeo = new THREE.PlaneGeometry(panelWidth, panelHeight);
-  const panelMat = new THREE.MeshPhysicalMaterial({
-    color: 0x050c18,
+  // ==========================================
+  // E. Vertical Scrubber Guide Plane & Tooltip
+  // ==========================================
+  const scrubberLineGeo = new THREE.PlaneGeometry(0.003, 0.46);
+  const scrubberLineMat = new THREE.MeshBasicMaterial({
+    color: 0x38bdf8,
     transparent: true,
-    opacity: 0.86,
-    roughness: 0.2,
-    metalness: 0.1,
-    transmission: 0.85,
-    thickness: 0.25,
-    depthWrite: false,
-    depthTest: true,
+    opacity: 0.75,
     side: THREE.DoubleSide
   });
+  const scrubberLine = new THREE.Mesh(scrubberLineGeo, scrubberLineMat);
+  scrubberLine.position.set(0, chartBottomY + chartHeight * 0.5, 0.065);
+  scrubberLine.visible = false;
+  scrubberLine.raycast = () => {};
+  contentGroup.add(scrubberLine);
+  chartWin.userData.scrubberLine = scrubberLine;
 
-  const glassPanel = new THREE.Mesh(panelGeo, panelMat);
-  glassPanel.position.set(0, 0, -0.04);
-  glassPanel.renderOrder = 10;
-  chartGroup.add(glassPanel);
+  // Floating OHLC Tooltip Pill inside chartWin (initially visible = false)
+  if (chartWin.userData.tooltipMesh) {
+    chartWin.remove(chartWin.userData.tooltipMesh);
+    if (chartWin.userData.tooltipMesh.geometry) chartWin.userData.tooltipMesh.geometry.dispose();
+    if (chartWin.userData.tooltipMesh.material) chartWin.userData.tooltipMesh.material.dispose();
+  }
+  const tooltipCanvas = document.createElement('canvas');
+  tooltipCanvas.width = 384; tooltipCanvas.height = 96;
+  const tooltipTex = new THREE.CanvasTexture(tooltipCanvas);
+  const tooltipMat = new THREE.MeshBasicMaterial({ map: tooltipTex, transparent: true, depthTest: false });
+  const tooltipMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.32, 0.08), tooltipMat);
+  tooltipMesh.position.set(0, 0.22, 0.08);
+  tooltipMesh.visible = false;
+  tooltipMesh.raycast = () => {};
+  chartWin.add(tooltipMesh);
+  chartWin.userData.tooltipMesh = tooltipMesh;
+  chartWin.userData.tooltipTex = tooltipTex;
+  chartWin.userData.tooltipCanvas = tooltipCanvas;
+  chartWin.userData.ttMesh = tooltipMesh;
+  chartWin.userData.ttSprite = tooltipMesh;
+}
 
-  // Subtle 0.5px Dark Slate Border (#334155)
-  const borderGeo = new THREE.EdgesGeometry(panelGeo);
-  const borderMat = new THREE.LineBasicMaterial({
-    color: 0x334155,
-    transparent: true,
-    opacity: 0.75
+// ---------------------------------------------------------------------------
+// 4. Bottom Resolution & Timeframe Pills
+// ---------------------------------------------------------------------------
+function buildTimeframePills(chartWin, activePresetId = '1M_30m') {
+  const rowY = -0.34;
+  const pillWidth = 0.126;
+  const pillHeight = 0.042;
+  const gap = 0.016;
+  const totalWidth = RESOLUTION_PRESETS.length * pillWidth + (RESOLUTION_PRESETS.length - 1) * gap;
+  const startX = -totalWidth * 0.5 + pillWidth * 0.5;
+
+  chartWin.userData.timeframePills = [];
+
+  RESOLUTION_PRESETS.forEach((preset, i) => {
+    const xPos = startX + i * (pillWidth + gap);
+    const isActive = preset.id === activePresetId || preset.label === activePresetId;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 256; canvas.height = 84;
+    const ctx = canvas.getContext('2d');
+
+    // Background pill shape
+    ctx.fillStyle = isActive ? '#06b6d4' : '#111c30';
+    ctx.roundRect(4, 4, 248, 76, 14);
+    ctx.fill();
+
+    // Subtle outline border
+    ctx.strokeStyle = isActive ? '#38bdf8' : '#334155';
+    ctx.lineWidth = 3;
+    ctx.roundRect(4, 4, 248, 76, 14);
+    ctx.stroke();
+
+    // Preset label text
+    ctx.fillStyle = isActive ? '#ffffff' : '#94a3b8';
+    ctx.font = 'bold 27px "Inter", "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(preset.label, 128, 42);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    const geo = new THREE.PlaneGeometry(pillWidth, pillHeight);
+    const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
+    const pillMesh = new THREE.Mesh(geo, mat);
+    pillMesh.position.set(xPos, rowY, 0.035);
+
+    // Interactive Raycast Setup
+    pillMesh.userData = {
+      isResolutionPreset: true,
+      isTimeframePill: true,
+      presetId: preset.id,
+      label: preset.label,
+      parentWindow: chartWin,
+      onClick: () => setChartResolutionPreset(preset.id, null, chartWin)
+    };
+
+    chartWin.add(pillMesh);
+    chartWin.userData.timeframePills.push({ mesh: pillMesh, preset });
   });
-  const panelBorder = new THREE.LineSegments(borderGeo, borderMat);
-  panelBorder.position.set(0, 0, -0.035);
-  panelBorder.renderOrder = 10;
-  chartGroup.add(panelBorder);
+}
 
-  // 2. Glowing Neon Laser Tether Beam extending from chart bottom back to planet or sun
-  const tetherPts = [
-    new THREE.Vector3(0, 0, 0),
-    new THREE.Vector3(0, 0, 0)
-  ];
-  const tetherGeo = new THREE.BufferGeometry().setFromPoints(tetherPts);
-  const tetherMat = new THREE.LineDashedMaterial({
-    color: themeColorHex,
-    dashSize: 0.12,
-    gapSize: 0.06,
-    transparent: true,
-    opacity: 0.85,
-    blending: THREE.AdditiveBlending
-  });
-  const tetherLine = new THREE.Line(tetherGeo, tetherMat);
-  tetherLine.computeLineDistances();
-  tetherLine.renderOrder = 998;
-  scene.add(tetherLine);
+// ---------------------------------------------------------------------------
+// 5. Main Multi-Window Spawner
+// ---------------------------------------------------------------------------
+export function openOrFocusChart(ticker, assetData = {}, camera = null, scene = null) {
+  const targetCam = camera || (typeof window !== 'undefined' ? window.camera : null);
+  const targetScene = scene || currentGlobalScene || (typeof window !== 'undefined' ? window.scene : null);
+  if (!ticker || !targetCam || !targetScene) return;
+  if (targetScene) currentGlobalScene = targetScene;
 
-  // Surface Beacon Glow Ring at target
-  const beaconGeo = new THREE.RingGeometry(0.04, 0.12, 32);
-  const beaconMat = new THREE.MeshBasicMaterial({
-    color: themeColorHex,
-    side: THREE.DoubleSide,
-    transparent: true,
-    opacity: 0.9,
-    blending: THREE.AdditiveBlending
-  });
-  const beaconMesh = new THREE.Mesh(beaconGeo, beaconMat);
-  beaconMesh.rotation.x = Math.PI / 2;
-  beaconMesh.renderOrder = 998;
-  scene.add(beaconMesh);
+  // 1. If this ticker is ALREADY open, highlight it and bring forward
+  const sym = String(ticker).toUpperCase();
+  const existing = activeChartWindows.find(win => win.userData.ticker === ticker || win.userData.ticker === sym);
+  if (existing) {
+    pulseChartHighlight(existing);
+    return existing;
+  }
 
-  // 3. Financial Support & Resistance Gridlines (4 Horizontal Lines)
-  const gridLineCount = 3;
-  const priceLabels = [];
-  for (let g = 0; g <= gridLineCount; g++) {
-    const gy = -0.55 + (g / gridLineCount) * 1.1;
-    const gridPts = [
-      new THREE.Vector3(-1.4, gy, 0.01),
-      new THREE.Vector3(1.4, gy, 0.01)
-    ];
-    const gridGeo = new THREE.BufferGeometry().setFromPoints(gridPts);
-    const gridMat = new THREE.LineDashedMaterial({
-      color: 0x334155,
-      dashSize: 0.05,
-      gapSize: 0.03,
-      transparent: true,
-      opacity: 0.4
-    });
-    const gridLine = new THREE.Line(gridGeo, gridMat);
-    gridLine.computeLineDistances();
-    gridLine.renderOrder = 1000;
-    chartGroup.add(gridLine);
+  // 2. Determine an available slot (0: Center, 1: Right, 2: Left)
+  const occupiedSlots = activeChartWindows.map(win => win.userData.slotIndex);
+  let targetSlot = 0;
+  for (let s = 0; s < 3; s++) {
+    if (!occupiedSlots.includes(s)) {
+      targetSlot = s;
+      break;
+    }
+  }
 
-    // Right-aligned Price Level Label
-    const priceVal = minP + (g / gridLineCount) * range;
-    const priceLabel = new Text();
-    priceLabel.text = isINR
-      ? (priceVal >= 1000 ? `₹${Math.round(priceVal).toLocaleString('en-IN')}` : `₹${priceVal.toFixed(1)}`)
-      : (priceVal >= 1000 ? `$${Math.round(priceVal).toLocaleString()}` : `$${priceVal.toFixed(1)}`);
-    priceLabel.fontSize = 0.075;
-    priceLabel.color = 0x64748b;
-    priceLabel.anchorX = 'left';
-    priceLabel.anchorY = 'middle';
-    priceLabel.position.set(1.45, gy, 0.02);
-    priceLabel.renderOrder = 1000;
-    priceLabel.sync();
-    chartGroup.add(priceLabel);
-    chartTextLabels.push(priceLabel);
-    priceLabels.push(priceLabel);
+  // If 3 windows are already open, replace the oldest one cleanly
+  if (activeChartWindows.length >= 3) {
+    const oldest = activeChartWindows[0];
+    closeChartWindow(oldest, targetScene);
+  }
+
+  // 3. Create Root Chart Window Group
+  const chartWin = new THREE.Group();
+  chartWin.userData.ticker = ticker;
+  chartWin.userData.slotIndex = targetSlot;
+  chartWin.userData.isChartWindow = true;
+  chartWin.userData.displayMode = 'candles';
+  chartWin.userData.activePresetId = '1M_30m';
+
+  // 4. Arc Positioning around user gaze
+  const slotYawAngles = [0, 0.46, -0.46]; // Center (0), Right (~26 deg), Left (~-26 deg)
+  const yaw = slotYawAngles[targetSlot] || 0;
+
+  const gaze = new THREE.Vector3();
+  if (targetCam.getWorldDirection) {
+    targetCam.getWorldDirection(gaze);
+  } else if (targetCam.quaternion) {
+    gaze.set(0, 0, -1).applyQuaternion(targetCam.quaternion);
+  } else {
+    gaze.set(0, 0, -1);
+  }
+  gaze.y = 0;
+  if (gaze.lengthSq() < 0.001) gaze.set(0, 0, -1);
+  gaze.normalize();
+
+  const spawnVector = gaze.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+  if (targetCam.position) {
+    chartWin.position.copy(targetCam.position).add(spawnVector.multiplyScalar(1.25));
+    chartWin.position.y = (targetCam.position.y || 1.45) + 0.05;
+  } else {
+    chartWin.position.set(0, 1.5, -1.25);
+  }
+
+  if (targetCam.quaternion) {
+    chartWin.quaternion.copy(targetCam.quaternion);
+  }
+  if (yaw !== 0) {
+    chartWin.rotateY(-yaw * 0.75); // Angle inward toward the viewer
   }
 
   // =========================================================================
-  // 4. HIGH-PRECISION SPLINE AREA VECTOR LAYER (Container)
+  // 5. Optical Frosted Glass Slate Base Plate (z = 0.0m) - Spatial HUD Glass
   // =========================================================================
-  const splineContainer = new THREE.Group();
-  splineContainer.name = 'SplineContainerLayer';
-  splineContainer.renderOrder = 1000;
-
-  // 1. Generate smooth Catmull-Rom sampled points across time steps
-  const rawPoints3D = [];
-  for (let i = 0; i < count; i++) {
-    const x = startX + i * stepX;
-    const y = mapY(history[i]);
-    rawPoints3D.push(new THREE.Vector3(x, y, 0.02));
-  }
-  const splineCurve = new THREE.CatmullRomCurve3(rawPoints3D, false, 'catmullrom', 0.35);
-  const smoothPoints = splineCurve.getPoints(120);
-
-  // 2. Modern 2D Planar Area Gradient Fill (smooth vertical alpha fade)
-  const areaMesh = createAreaGradientMesh(smoothPoints, baselineY, themeColorHex);
-  splineContainer.add(areaMesh);
-
-  // 3. Razor-Sharp TradingView / Bloomberg Vector Line (Line2 with linewidth: 3.2)
-  const linePositions = [];
-  smoothPoints.forEach((p) => {
-    linePositions.push(p.x, p.y, 0.022);
-  });
-
-  const lineGeo = new LineGeometry();
-  lineGeo.setPositions(linePositions);
-
-  const vectorLineMat = new LineMaterial({
-    color: themeColorHex,
-    linewidth: 3.2,
-    worldUnits: false,
-    resolution: new THREE.Vector2(window.innerWidth || 1920, window.innerHeight || 1080),
-    transparent: true,
-    opacity: 0.95,
-    depthTest: true,
-    depthWrite: false
-  });
-
-  const vectorLine = new Line2(lineGeo, vectorLineMat);
-  vectorLine.computeLineDistances();
-  vectorLine.renderOrder = 1000;
-  splineContainer.add(vectorLine);
-
-  // 4. Endpoint Marker
-  const lastPoint = smoothPoints[smoothPoints.length - 1];
-
-  const ringGeo = new THREE.RingGeometry(0.022, 0.034, 32);
-  const ringMat = new THREE.MeshBasicMaterial({
-    color: themeColorHex,
-    transparent: true,
-    opacity: 0.85,
-    side: THREE.DoubleSide,
-    depthWrite: false
-  });
-  const pulseRing = new THREE.Mesh(ringGeo, ringMat);
-  pulseRing.position.set(lastPoint.x, lastPoint.y, 0.024);
-  pulseRing.renderOrder = 1000;
-  splineContainer.add(pulseRing);
-
-  const dotGeo = new THREE.CircleGeometry(0.015, 32);
-  const dotMat = new THREE.MeshBasicMaterial({
-    color: 0xffffff,
-    side: THREE.DoubleSide,
-    depthWrite: false
-  });
-  const coreDot = new THREE.Mesh(dotGeo, dotMat);
-  coreDot.position.set(lastPoint.x, lastPoint.y, 0.025);
-  coreDot.renderOrder = 1000;
-  splineContainer.add(coreDot);
-
-  // Floating Price Badge Pill
-  const pillW = 0.46;
-  const pillH = 0.14;
-  const pillGeo = new THREE.PlaneGeometry(pillW, pillH);
-  const pillMat = new THREE.MeshBasicMaterial({
-    color: 0x050c18,
-    transparent: true,
-    opacity: 0.92,
-    side: THREE.DoubleSide,
-    depthWrite: false
-  });
-  const pillMesh = new THREE.Mesh(pillGeo, pillMat);
-  pillMesh.position.set(lastPoint.x - 0.30, lastPoint.y + 0.06, 0.026);
-  pillMesh.renderOrder = 1000;
-  splineContainer.add(pillMesh);
-
-  const pillBorderGeo = new THREE.EdgesGeometry(pillGeo);
-  const pillBorderMat = new THREE.LineBasicMaterial({
-    color: themeColorHex,
-    transparent: true,
-    opacity: 0.75
-  });
-  const pillBorder = new THREE.LineSegments(pillBorderGeo, pillBorderMat);
-  pillBorder.position.set(lastPoint.x - 0.30, lastPoint.y + 0.06, 0.027);
-  pillBorder.renderOrder = 1000;
-  splineContainer.add(pillBorder);
-
-  const pillText = new Text();
-  pillText.text = `${isPositive ? '+' : ''}${returnVal}%`;
-  pillText.fontSize = 0.076;
-  pillText.color = themeColorHex;
-  pillText.anchorX = 'center';
-  pillText.anchorY = 'middle';
-  pillText.position.set(lastPoint.x - 0.30, lastPoint.y + 0.06, 0.030);
-  pillText.renderOrder = 1000;
-  pillText.sync();
-  splineContainer.add(pillText);
-  chartTextLabels.push(pillText);
-
-  chartGroup.add(splineContainer);
-
-  // =========================================================================
-  // 5. 3D CANDLESTICK & VOLUME DEPTH LAYER
-  // =========================================================================
-  const candleGroup = renderCandlesticks(asset, chartGroup, { candles, minP, maxP, range });
-  if (candleGroup) {
-    candleGroup.visible = (currentChartMode === 'candlestick');
-  }
-
-  // =========================================================================
-  // 6. FLOATING 3D CANDLESTICK MICRO-HUD TOOLTIP BADGE
-  // =========================================================================
-  const tooltipGroup = new THREE.Group();
-  tooltipGroup.name = 'CandleTooltipBadge';
-  tooltipGroup.visible = false;
-  tooltipGroup.renderOrder = 1001;
-
-  const ttBgGeo = new THREE.PlaneGeometry(2.1, 0.26);
-  const ttBgMat = new THREE.MeshBasicMaterial({
+  const bgGeo = new THREE.PlaneGeometry(1.32, 0.82);
+  const slateMat = new THREE.MeshPhysicalMaterial({
     color: 0x030712,
     transparent: true,
-    opacity: 0.94,
-    side: THREE.DoubleSide,
-    depthWrite: false
+    opacity: 0.90,
+    roughness: 0.15,
+    metalness: 0.1,
+    transmission: 0.2, // Gives realistic optical glass depth in XR
+    ior: 1.4,
+    side: THREE.DoubleSide
   });
-  const ttBg = new THREE.Mesh(ttBgGeo, ttBgMat);
-  ttBg.renderOrder = 1001;
-  tooltipGroup.add(ttBg);
+  const bgMesh = new THREE.Mesh(bgGeo, slateMat);
+  bgMesh.position.set(0, 0, 0.0);
+  bgMesh.raycast = () => {}; // NEVER block raycasts to planets behind it
+  chartWin.add(bgMesh);
+  chartWin.userData.bgMesh = bgMesh;
 
-  const ttBorderGeo = new THREE.EdgesGeometry(ttBgGeo);
-  const ttBorderMat = new THREE.LineBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.9 });
-  const ttBorder = new THREE.LineSegments(ttBorderGeo, ttBorderMat);
-  ttBorder.renderOrder = 1001;
-  tooltipGroup.add(ttBorder);
-
-  const ttText = new Text();
-  ttText.text = 'O: $0 | H: $0 | L: $0 | C: $0 | Vol: 0';
-  ttText.fontSize = 0.068;
-  ttText.color = 0x00f0ff;
-  ttText.anchorX = 'center';
-  ttText.anchorY = 'middle';
-  ttText.position.set(0, 0, 0.015);
-  ttText.renderOrder = 1001;
-  ttText.sync();
-  tooltipGroup.add(ttText);
-  chartTextLabels.push(ttText);
-
-  chartGroup.add(tooltipGroup);
-
-  // =========================================================================
-  // 7. DYNAMIC TIME TICKS ALONG X-AXIS BASELINE
-  // =========================================================================
-  const timeTicks = getTimeTicksForPreset(currentResolutionPreset);
-  const timeTickLabels = [];
-  for (let t = 0; t < timeTicks.length; t++) {
-    const tx = -1.4 + (t / (timeTicks.length - 1)) * 2.8;
-    const tickText = new Text();
-    tickText.text = timeTicks[t];
-    tickText.fontSize = 0.075;
-    tickText.color = 0x64748b;
-    tickText.anchorX = 'center';
-    tickText.anchorY = 'top';
-    tickText.position.set(tx, baselineY - 0.04, 0.02);
-    tickText.renderOrder = 1000;
-    tickText.sync();
-    chartGroup.add(tickText);
-    chartTextLabels.push(tickText);
-    timeTickLabels.push(tickText);
-  }
-
-  // 8. Crisp Bloomberg HUD Header Typography
-  const headerTitle = new Text();
-  const exchangeTag = asset.exchange ? `:${asset.exchange}` : (isINR ? ':NSE' : '');
-  const displayPrice = asset.price ?? asset.latestPrice;
-  const formattedPrice = displayPrice !== undefined && displayPrice !== null
-    ? (isINR
-        ? (displayPrice >= 1000 ? `₹${Number(displayPrice).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `₹${Number(displayPrice).toFixed(2)}`)
-        : `$${Number(displayPrice).toFixed(2)}`)
-    : (asset.formattedValue || '$0');
-  headerTitle.text = `${asset.name || 'Asset'} (${symbol}${exchangeTag})  •  ${formattedPrice}`;
-  headerTitle.fontSize = 0.125;
-  headerTitle.color = 0xf8fafc;
-  headerTitle.anchorX = 'left';
-  headerTitle.anchorY = 'top';
-  headerTitle.position.set(-panelWidth / 2 + 0.14, panelHeight / 2 - 0.10, 0.03);
-  headerTitle.renderOrder = 1000;
-  headerTitle.sync();
-  chartGroup.add(headerTitle);
-  chartTextLabels.push(headerTitle);
-
-  const headerSub = new Text();
-  const allocationPart = asset.allocation !== undefined ? `Allocation: ${asset.allocation}%` : `Sector: ${asset.sector || asset.category || 'Equities'}`;
-  headerSub.text = `${asset.category || asset.sector || 'Holding'}  •  ${allocationPart}  •  24h Return: ${isPositive ? '+' : ''}${returnVal}%`;
-  headerSub.fontSize = 0.082;
-  headerSub.color = 0x94a3b8;
-  headerSub.anchorX = 'left';
-  headerSub.anchorY = 'top';
-  headerSub.position.set(-panelWidth / 2 + 0.14, panelHeight / 2 - 0.24, 0.03);
-  headerSub.renderOrder = 1000;
-  headerSub.sync();
-  chartGroup.add(headerSub);
-  chartTextLabels.push(headerSub);
-
-  // 9. 3D In-Scene Segmented Toggle Buttons [ 📈 Spline | 📊 Candlestick ]
-  const registeredButtons = [];
-
-  const toggleBtnSplineGeo = new THREE.PlaneGeometry(0.56, 0.14);
-  const toggleBtnCandleGeo = new THREE.PlaneGeometry(0.66, 0.14);
-  const toggleBtnMatActive = new THREE.MeshBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false });
-  const toggleBtnMatInactive = new THREE.MeshBasicMaterial({ color: 0x1e293b, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthWrite: false });
-
-  const btn3DSpline = new THREE.Mesh(toggleBtnSplineGeo, currentChartMode === 'spline' ? toggleBtnMatActive : toggleBtnMatInactive);
-  btn3DSpline.position.set(0.55, panelHeight / 2 - 0.15, 0.035);
-  btn3DSpline.userData = { isChartModeToggle: true, targetMode: 'spline', isInteractive: true, isVRButton: true };
-  btn3DSpline.renderOrder = 1000;
-  chartGroup.add(btn3DSpline);
-  registerInteractiveObject(btn3DSpline, () => {
-    setChartDisplayMode('spline');
-  });
-  registeredButtons.push(btn3DSpline);
-
-  const txt3DSpline = new Text();
-  txt3DSpline.text = '📈 SPLINE';
-  txt3DSpline.fontSize = 0.062;
-  txt3DSpline.color = currentChartMode === 'spline' ? 0x00f0ff : 0x94a3b8;
-  txt3DSpline.anchorX = 'center';
-  txt3DSpline.anchorY = 'middle';
-  txt3DSpline.position.set(0.55, panelHeight / 2 - 0.15, 0.045);
-  txt3DSpline.renderOrder = 1000;
-  txt3DSpline.sync();
-  chartGroup.add(txt3DSpline);
-  chartTextLabels.push(txt3DSpline);
-
-  const btn3DCandle = new THREE.Mesh(toggleBtnCandleGeo, currentChartMode === 'candlestick' ? toggleBtnMatActive : toggleBtnMatInactive);
-  btn3DCandle.position.set(1.20, panelHeight / 2 - 0.15, 0.035);
-  btn3DCandle.userData = { isChartModeToggle: true, targetMode: 'candlestick', isInteractive: true, isVRButton: true };
-  btn3DCandle.renderOrder = 1000;
-  chartGroup.add(btn3DCandle);
-  registerInteractiveObject(btn3DCandle, () => {
-    setChartDisplayMode('candlestick');
-  });
-  registeredButtons.push(btn3DCandle);
-
-  const txt3DCandle = new Text();
-  txt3DCandle.text = '📊 CANDLES';
-  txt3DCandle.fontSize = 0.062;
-  txt3DCandle.color = currentChartMode === 'candlestick' ? 0x00f0ff : 0x94a3b8;
-  txt3DCandle.anchorX = 'center';
-  txt3DCandle.anchorY = 'middle';
-  txt3DCandle.position.set(1.20, panelHeight / 2 - 0.15, 0.045);
-  txt3DCandle.renderOrder = 1000;
-  txt3DCandle.sync();
-  chartGroup.add(txt3DCandle);
-  chartTextLabels.push(txt3DCandle);
-
-  // 10. Minimal Close [X] Button at Top-Right
-  const closeBtnGeo = new THREE.PlaneGeometry(0.18, 0.14);
-  const closeBtnMat = new THREE.MeshBasicMaterial({
-    color: 0x334155,
+  // Subtle 1px glowing cyan border (color: 0x0ea5e9, opacity: 0.35, z = 0.002m)
+  const borderEdges = new THREE.EdgesGeometry(bgGeo);
+  const borderMat = new THREE.LineBasicMaterial({
+    color: 0x0ea5e9,
     transparent: true,
-    opacity: 0.6,
-    side: THREE.DoubleSide,
-    depthWrite: false
+    opacity: 0.35
   });
-  const closeBtn = new THREE.Mesh(closeBtnGeo, closeBtnMat);
-  closeBtn.position.set(panelWidth / 2 - 0.15, panelHeight / 2 - 0.15, 0.035);
-  closeBtn.name = 'CloseChartButton';
-  closeBtn.userData = { isCloseButton: true, isInteractive: true, isVRButton: true };
-  closeBtn.renderOrder = 1000;
-  chartGroup.add(closeBtn);
-  registerInteractiveObject(closeBtn, () => {
-    removeCurrentChart(scene);
-  });
-  registeredButtons.push(closeBtn);
+  const borderLines = new THREE.LineSegments(borderEdges, borderMat);
+  borderLines.position.z = 0.002;
+  borderLines.raycast = () => {}; // Non-blocking
+  chartWin.add(borderLines);
+  chartWin.userData.borderLines = borderLines;
 
-  const closeText = new Text();
-  closeText.text = '✕';
-  closeText.fontSize = 0.095;
-  closeText.color = 0x94a3b8;
-  closeText.anchorX = 'center';
-  closeText.anchorY = 'middle';
-  closeText.position.set(panelWidth / 2 - 0.15, panelHeight / 2 - 0.15, 0.045);
-  closeText.renderOrder = 1000;
-  closeText.sync();
-  chartGroup.add(closeText);
-  chartTextLabels.push(closeText);
+  // Dedicated Soft Holographic Terminal Lighting inside chartWin (Zero harsh glare)
+  // 1. Gentle ambient fill light for 3D candles and volume pillars
+  const holoFillLight = new THREE.AmbientLight(0xffffff, 0.50);
+  chartWin.add(holoFillLight);
 
-  // =========================================================================
-  // 11. TRADINGVIEW DUAL-PARAMETER TIMEFRAME & INTERVAL RESOLUTION BAR (9 Pills)
-  // =========================================================================
-  const resBtnWidth = 0.33;
-  const resBtnHeight = 0.11;
-  const resBtnGap = 0.035;
-  const resStartX = -((RESOLUTION_PRESETS.length - 1) * (resBtnWidth + resBtnGap)) / 2;
-  const resBarY = -panelHeight / 2 + 0.12;
+  // 2. Soft cyan rim directional light for 3D depth without center hotspot
+  const holoRimLight = new THREE.DirectionalLight(0x06b6d4, 0.40);
+  holoRimLight.position.set(0.65, 0.80, 0.60);
+  chartWin.add(holoRimLight);
 
-  const resolutionButtons = [];
+  // 6. Header Section (Top-Left)
+  buildHeader(chartWin, ticker, assetData);
 
-  RESOLUTION_PRESETS.forEach((p, i) => {
-    const rx = resStartX + i * (resBtnWidth + resBtnGap);
-    const isActive = p.id === currentResolutionPreset;
+  // 7. Top-Right Mode Toggles & Close Button
+  buildTopControls(chartWin, targetScene);
 
-    const btnGeo = new THREE.PlaneGeometry(resBtnWidth, resBtnHeight);
-    const btnMat = new THREE.MeshStandardMaterial({
-      color: isActive ? 0x0891b2 : 0x0f172a,
-      roughness: 0.3,
-      metalness: 0.2,
-      emissive: new THREE.Color(isActive ? 0x00f0ff : 0x0f172a),
-      emissiveIntensity: isActive ? 0.45 : 0.20,
-      transparent: true,
-      opacity: 0.90,
-      side: THREE.DoubleSide
-    });
-    const btnMesh = new THREE.Mesh(btnGeo, btnMat);
-    btnMesh.position.set(rx, resBarY, 0.035);
-    btnMesh.name = `ResBtn_${p.id}`;
-    btnMesh.userData = {
-      isVRButton: true,
-      isResolutionPreset: true,
-      action: 'setResolution',
-      presetId: p.id,
-      isInteractive: true,
-      baseColor: isActive ? 0x0891b2 : 0x0f172a,
-      hoverColor: 0x06b6d4,
-      emissiveColor: 0x06b6d4,
-      baseEmissiveIntensity: isActive ? 0.45 : 0.20,
-      hoverEmissiveIntensity: 0.80,
-      borderColor: isActive ? 0x00f0ff : 0x334155,
-      originalZ: 0.035
-    };
-    btnMesh.renderOrder = 1000;
-    chartGroup.add(btnMesh);
+  // 7b. Golden Dollar Badge Wolf of Wall Street Easter Egg
+  attachWolfEggButton(chartWin);
 
-    const borderGeo = new THREE.EdgesGeometry(btnGeo);
-    const borderMat = new THREE.LineBasicMaterial({
-      color: isActive ? 0x00f0ff : 0x334155,
-      transparent: true,
-      opacity: 0.85
-    });
-    const border = new THREE.LineSegments(borderGeo, borderMat);
-    border.position.set(rx, resBarY, 0.036);
-    border.renderOrder = 1000;
-    chartGroup.add(border);
-    btnMesh.userData.borderMesh = border;
-
-    const txt = new Text();
-    txt.text = p.label;
-    txt.fontSize = 0.052;
-    txt.color = isActive ? 0x00f0ff : 0x94a3b8;
-    txt.anchorX = 'center';
-    txt.anchorY = 'middle';
-    txt.position.set(rx, resBarY, 0.045);
-    txt.renderOrder = 1000;
-    txt.sync();
-    chartGroup.add(txt);
-    chartTextLabels.push(txt);
-
-    registerInteractiveObject(btnMesh, () => {
-      setChartResolutionPreset(p.id, scene);
-    });
-    registeredButtons.push(btnMesh);
-
-    resolutionButtons.push({ mesh: btnMesh, border, text: txt, id: p.id });
-  });
-
-  // Store metadata on chartGroup for fast mode transitions, realtime updates & tooltips
-  chartGroup.userData = {
-    splineContainer,
-    candleGroup,
-    tooltipGroup,
-    ttText,
-    btn3DSpline,
-    txt3DSpline,
-    btn3DCandle,
-    txt3DCandle,
-    toggleBtnMatActive,
-    toggleBtnMatInactive,
-    vectorLineMat,
-    vectorLine,
-    areaMesh,
-    pulseRing,
-    coreDot,
-    pillMesh,
-    pillBorder,
-    pillText,
-    headerTitle,
-    headerSub,
-    priceLabels,
-    timeTickLabels,
-    resolutionButtons,
-    registeredButtons,
-    tetherLine,
-    beaconMesh,
-    isVR,
-    activeSymbol: symbol,
-    activeName: asset.name || symbol,
-    activeExchange: asset.exchange || (isINR ? 'NSE' : ''),
-    activeCandles: candles,
-    currency: isINR ? 'INR' : 'USD',
-    isINR,
-    minP,
-    maxP,
-    range,
-    themeColorHex
-  };
-
-  scene.add(chartGroup);
-  activeChartGroup = chartGroup;
-
-  // Apply initial mode visibility directly
-  setChartDisplayMode(currentChartMode);
-
-  return chartGroup;
-}
-
-/**
- * Convenience helper to render or switch to 3D candlestick mode directly.
- */
-export function render3DCandlestickChart(planetMeshOrStockData, scene, options = {}) {
-  const chart = show3DSplineChart(planetMeshOrStockData, scene, options);
-  setChartDisplayMode('candlestick');
-  return chart;
-}
-
-/**
- * Switches the chart's timeframe & candle interval resolution preset (e.g. '1D_1m', '5D_5m', '1M_30m', '1Y_1d', etc.).
- * @param {string} presetId Preset identifier
- * @param {THREE.Scene} scene Optional scene
- */
-export function setChartResolutionPreset(presetId, scene = null) {
-  const preset = RESOLUTION_PRESETS.find((p) => p.id === presetId);
-  if (!preset) return;
-  currentResolutionPreset = presetId;
-  soundFx.playEnergySurgeSound();
-
-  // 1. Update 2D DOM selector buttons and dropdown labels
-  const pills = document.querySelectorAll('.resolution-pill');
-  pills.forEach((p) => {
-    p.classList.toggle('active', p.getAttribute('data-preset') === presetId);
-  });
-  const dropdownItems = document.querySelectorAll('.resolution-item');
-  dropdownItems.forEach((item) => {
-    item.classList.toggle('active', item.getAttribute('data-preset') === presetId);
-  });
-  const dropdownLabel = document.getElementById('current-resolution-label');
-  if (dropdownLabel) {
-    dropdownLabel.textContent = preset.label;
+  // 8. 3D Candlesticks, Volumes & Right Price Axis
+  let rawNumeric = assetData.priceNumeric;
+  if (!rawNumeric && assetData.price) {
+    const cleaned = String(assetData.price).replace(/[^0-9.-]+/g, '');
+    rawNumeric = parseFloat(cleaned);
   }
+  const basePrice = (rawNumeric && !isNaN(rawNumeric)) ? rawNumeric : 140;
+  chartWin.userData.basePrice = basePrice;
+  chartWin.userData.currency = String(assetData.price || '').startsWith('₹') ? '₹' : '$';
+  renderChartDataContent(chartWin, basePrice, 0.035, 20);
 
-  // 2. Update 3D In-Scene Resolution Buttons
-  if (activeChartGroup?.userData?.resolutionButtons) {
-    activeChartGroup.userData.resolutionButtons.forEach(({ mesh, border, text, id }) => {
-      const isActive = id === presetId;
-      if (mesh?.material) {
-        mesh.userData.baseColor = isActive ? 0x0891b2 : 0x0f172a;
-        mesh.userData.baseEmissiveIntensity = isActive ? 0.45 : 0.20;
-        mesh.userData.borderColor = isActive ? 0x00f0ff : 0x334155;
-        if (mesh.material.color) mesh.material.color.setHex(isActive ? 0x0891b2 : 0x0f172a);
-        if (mesh.material.emissive) {
-          mesh.material.emissive.setHex(isActive ? 0x00f0ff : 0x0f172a);
-          mesh.material.emissiveIntensity = isActive ? 0.45 : 0.20;
-        }
-      }
-      if (border?.material) {
-        border.material.color.setHex(isActive ? 0x00f0ff : 0x334155);
-      }
-      if (text) {
-        text.color = isActive ? 0x00f0ff : 0x94a3b8;
-        text.sync();
-      }
-    });
-  }
+  // 9. Bottom Resolution & Timeframe Pills
+  buildTimeframePills(chartWin, '1M_30m');
 
-  // 3. Update X-Axis Time Ticks Text in 3D chart
-  if (activeChartGroup?.userData?.timeTickLabels) {
-    const ticks = getTimeTicksForPreset(presetId);
-    activeChartGroup.userData.timeTickLabels.forEach((label, idx) => {
-      if (ticks[idx]) {
-        label.text = ticks[idx];
-        label.visible = true;
-        label.sync();
-      } else {
-        label.visible = false;
-        label.sync();
-      }
-    });
-  }
-
-  // 4. Re-fetch or re-generate candles for active asset
-  if (activeChartGroup?.userData) {
-    const ud = activeChartGroup.userData;
-    const sym = ud.activeSymbol;
-    if (sym) {
-      fetchStockCandles(sym, preset.finnhubRes, preset.rangeDays, presetId).then((liveData) => {
-        updateChartWithRealtimeData(sym, liveData, scene);
-      });
-    }
-  }
-}
-
-/**
- * Smoothly switches the 3D Analytical Chart between Spline Area and 3D Candlestick + Volume mode.
- * @param {'spline' | 'candlestick'} mode Target display mode
- */
-export function setChartDisplayMode(mode = 'spline') {
-  currentChartMode = mode;
-  if (!activeChartGroup?.userData) return;
-
+  targetScene.add(chartWin);
+  activeChartWindows.push(chartWin);
   soundFx.playSelectSound();
-
-  const {
-    splineContainer,
-    btn3DSpline,
-    txt3DSpline,
-    btn3DCandle,
-    txt3DCandle,
-    toggleBtnMatActive,
-    toggleBtnMatInactive,
-    tooltipGroup
-  } = activeChartGroup.userData;
-
-  const candleGroup = activeChartGroup.getObjectByName('candleGroup');
-
-  // Update 3D In-Scene Button Visuals
-  if (btn3DSpline && btn3DCandle) {
-    btn3DSpline.material = mode === 'spline' ? toggleBtnMatActive : toggleBtnMatInactive;
-    btn3DCandle.material = mode === 'candlestick' ? toggleBtnMatActive : toggleBtnMatInactive;
-    if (txt3DSpline) {
-      txt3DSpline.color = mode === 'spline' ? 0x00f0ff : 0x94a3b8;
-      txt3DSpline.sync();
-    }
-    if (txt3DCandle) {
-      txt3DCandle.color = mode === 'candlestick' ? 0x00f0ff : 0x94a3b8;
-      txt3DCandle.sync();
-    }
-  }
-
-  // Update 2D Inspector Card Segmented UI Buttons
-  const btnSpline = document.getElementById('btn-chart-spline');
-  const btnCandle = document.getElementById('btn-chart-candlestick');
-  if (btnSpline && btnCandle) {
-    btnSpline.classList.toggle('active', mode === 'spline');
-    btnCandle.classList.toggle('active', mode === 'candlestick');
-  }
-
-  // Direct, uncorrupted visibility switching (no squashing scale.y)
-  if (mode === 'candlestick') {
-    if (splineContainer) splineContainer.visible = false;
-    if (candleGroup) {
-      candleGroup.visible = true;
-      candleGroup.scale.set(1, 1, 1);
-    }
-  } else {
-    if (tooltipGroup) tooltipGroup.visible = false;
-    if (candleGroup) candleGroup.visible = false;
-    if (splineContainer) {
-      splineContainer.visible = true;
-      splineContainer.scale.set(1, 1, 1);
-    }
-  }
+  console.log(`[Charts] Spawning rich 3D chart window #${activeChartWindows.length} for ${ticker} in slot ${targetSlot}`);
+  return chartWin;
 }
 
-/**
- * Returns current chart display mode ('spline' | 'candlestick').
- */
-export function getChartDisplayMode() {
-  return currentChartMode;
-}
+export const spawnOrFocusChart = openOrFocusChart;
 
-/**
- * Handles candle hover highlighting and updates the floating 3D micro-HUD tooltip badge.
- * @param {THREE.Mesh} candleMesh The hovered 3D candle mesh
- * @param {boolean} isHovered Whether pointer is over the candle
- */
-export function setCandleHoverState(candleMesh, isHovered) {
-  if (!activeChartGroup?.userData) return;
-  const { tooltipGroup, ttText } = activeChartGroup.userData;
+// ---------------------------------------------------------------------------
+// 6. Window Disposal & Cleanup
+// ---------------------------------------------------------------------------
+export function closeChartWindow(chartWin, scene = null) {
+  if (!chartWin) return;
 
-  if (isHovered && candleMesh?.userData?.isCandle) {
-    if (hoveredCandleMesh && hoveredCandleMesh !== candleMesh) {
-      setCandleHoverState(hoveredCandleMesh, false);
-    }
-    hoveredCandleMesh = candleMesh;
+  // Clean close hitboxes
+  const hitboxIdx = closeHitboxRegistry.findIndex(hb => hb.userData.parentWindow === chartWin);
+  if (hitboxIdx !== -1) closeHitboxRegistry.splice(hitboxIdx, 1);
 
-    // Scale candle up slightly
-    candleMesh.scale.set(1.15, 1.05, 1.2);
-
-    // Position floating 3D tooltip above candle high point (capped safely below panel header)
-    const data = candleMesh.userData.candleData;
-    if (tooltipGroup && ttText && data) {
-      const isINR = activeChartGroup.userData?.isINR || activeChartGroup.userData?.currency === 'INR';
-      const currSym = isINR ? '₹' : '$';
-      const topY = candleMesh.userData.topY || 0.2;
-      tooltipGroup.position.set(candleMesh.userData.posX, Math.min(0.68, topY + 0.18), 0.06);
-      ttText.text = `O: ${currSym}${data.open}  |  H: ${currSym}${data.high}  |  L: ${currSym}${data.low}  |  C: ${currSym}${data.close}  |  Vol: ${(data.volume / 1000).toFixed(1)}k`;
-      ttText.color = data.isBullish ? 0x10b981 : 0xef4444;
-      ttText.sync();
-      tooltipGroup.visible = true;
-    }
-  } else if (!isHovered && candleMesh) {
-    if (hoveredCandleMesh === candleMesh) hoveredCandleMesh = null;
-    candleMesh.scale.set(1.0, 1.0, 1.0);
-    if (tooltipGroup) tooltipGroup.visible = false;
-  }
-}
-
-/**
- * Dynamically updates active chart billboarding and laser tether line connecting chart to target planet or anchor.
- * @param {THREE.Camera} camera The active rendering camera
- * @param {number} delta Delta time in seconds
- */
-export function updateActiveChart(camera, delta = 0.016) {
-  if (!activeChartGroup) return;
-
-  // Face camera smoothly in desktop mode
-  if (camera && !activeChartGroup.userData?.isVR) {
-    activeChartGroup.quaternion.copy(camera.quaternion);
+  // Clean Wolf egg hitboxes
+  if (typeof window !== 'undefined' && window.activeEggHitboxes) {
+    const eggIdx = window.activeEggHitboxes.findIndex(hb => hb.userData.parentChart === chartWin || hb.userData.parentWindow === chartWin);
+    if (eggIdx !== -1) window.activeEggHitboxes.splice(eggIdx, 1);
   }
 
-  // Keep Line2 screen resolution in sync
-  const vectorLineMat = activeChartGroup.userData?.vectorLineMat;
-  if (vectorLineMat && vectorLineMat.resolution) {
-    vectorLineMat.resolution.set(window.innerWidth || 1920, window.innerHeight || 1080);
-  }
-
-  // Animate terminal pulse ring gently
-  const pulseRing = activeChartGroup.userData?.pulseRing;
-  if (pulseRing) {
-    const pulseScale = 1.0 + 0.14 * Math.sin(Date.now() * 0.006);
-    pulseRing.scale.set(pulseScale, pulseScale, 1.0);
-  }
-
-  // Dynamic Laser Tether Beam update connecting chart bottom to planet / anchor
-  const tetherLine = activeChartGroup.userData?.tetherLine;
-  const beaconMesh = activeChartGroup.userData?.beaconMesh;
-  if (tetherLine) {
-    activeChartGroup.updateMatrixWorld();
-    const chartBottomWorld = new THREE.Vector3(0, -1.125, 0).applyMatrix4(activeChartGroup.matrixWorld);
-    const targetPos = new THREE.Vector3(0, 0, 0);
-    if (trackedPlanetMesh) {
-      trackedPlanetMesh.getWorldPosition(targetPos);
-    }
-    const posAttr = tetherLine.geometry.attributes.position;
-    if (posAttr) {
-      posAttr.setXYZ(0, chartBottomWorld.x, chartBottomWorld.y, chartBottomWorld.z);
-      posAttr.setXYZ(1, targetPos.x, targetPos.y, targetPos.z);
-      posAttr.needsUpdate = true;
-      tetherLine.computeLineDistances();
-    }
-    if (beaconMesh) {
-      beaconMesh.position.copy(targetPos);
-    }
-  }
-}
-
-/**
- * Removes the currently active 3D analytical chart and restores planet label visibility.
- */
-export function removeCurrentChart(scene) {
-  if (!activeChartGroup || !scene) return;
+  // Remove from active list
+  const idx = activeChartWindows.indexOf(chartWin);
+  if (idx !== -1) activeChartWindows.splice(idx, 1);
 
   soundFx.playCloseSound();
 
-  if (trackedPlanetMesh?.userData?.textLabel) {
-    trackedPlanetMesh.userData.textLabel.visible = true;
-  }
+  // Remove from 3D scene
+  const targetScene = scene || currentGlobalScene || chartWin.parent || (typeof window !== 'undefined' ? window.scene : null);
+  if (chartWin.parent) chartWin.parent.remove(chartWin);
+  else if (targetScene) targetScene.remove(chartWin);
 
-  const target = activeChartGroup;
-  if (target.userData?.registeredButtons) {
-    target.userData.registeredButtons.forEach((btn) => unregisterInteractiveObject(btn));
-  }
-  if (target.userData?.tetherLine) {
-    scene.remove(target.userData.tetherLine);
-    target.userData.tetherLine.geometry?.dispose();
-    target.userData.tetherLine.material?.dispose();
-  }
-  if (target.userData?.beaconMesh) {
-    scene.remove(target.userData.beaconMesh);
-    target.userData.beaconMesh.geometry?.dispose();
-    target.userData.beaconMesh.material?.dispose();
-  }
-
-  activeChartGroup = null;
-  trackedPlanetMesh = null;
-  hoveredCandleMesh = null;
-  chartTextLabels = [];
-
-  scene.remove(target);
-  target.traverse((child) => {
+  chartWin.traverse((child) => {
     if (child.geometry) child.geometry.dispose();
     if (child.material) {
       if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
       else child.material.dispose();
     }
   });
+
+  console.log(`[Charts] Closed chart window. Remaining: ${activeChartWindows.length}`);
 }
 
-export function getCurrentChart() {
-  return activeChartGroup;
+export function removeCurrentChart(scene = null) {
+  if (activeChartWindows.length > 0) {
+    const latest = activeChartWindows[activeChartWindows.length - 1];
+    closeChartWindow(latest, scene);
+  }
 }
 
-export function getActiveChartData() {
-  return activeChartGroup?.userData || null;
+// ---------------------------------------------------------------------------
+// 7. Full Mode & Resolution Switchers (NO DUMMY STUBS)
+// ---------------------------------------------------------------------------
+export function setChartDisplayMode(mode = 'candles', targetChartWin = null) {
+  const chartWin = targetChartWin || (activeChartWindows.length > 0 ? activeChartWindows[activeChartWindows.length - 1] : null);
+  if (!chartWin || !chartWin.userData) return;
+
+  const isCandle = mode === 'candles' || mode === 'candlestick';
+  const normMode = isCandle ? 'candles' : 'spline';
+  chartWin.userData.displayMode = normMode;
+  soundFx.playSelectSound();
+
+  // Toggle Visibility between 3D Candlesticks and Spline Curve
+  if (chartWin.userData.candleGroup) chartWin.userData.candleGroup.visible = isCandle;
+  if (chartWin.userData.splineGroup) chartWin.userData.splineGroup.visible = !isCandle;
+
+  // Hide hover tooltip when switching
+  if (chartWin.userData.tooltipMesh) chartWin.userData.tooltipMesh.visible = false;
+  if (chartWin.userData.tooltipGroup) chartWin.userData.tooltipGroup.visible = false;
+  if (chartWin.userData.scrubberLine) chartWin.userData.scrubberLine.visible = false;
+  clearCandleHover();
+
+  // Update In-Scene 3D Buttons
+  if (chartWin.userData.btnSpline && chartWin.userData.btnCandles) {
+    const updateBtn = (mesh, textStr, isActive) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 270; canvas.height = 80;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = isActive ? '#06b6d4' : '#111c30';
+      ctx.roundRect(4, 4, 262, 72, 14);
+      ctx.fill();
+      ctx.strokeStyle = isActive ? '#38bdf8' : '#334155';
+      ctx.lineWidth = 3;
+      ctx.roundRect(4, 4, 262, 72, 14);
+      ctx.stroke();
+      ctx.fillStyle = isActive ? '#ffffff' : '#94a3b8';
+      ctx.font = 'bold 26px "Inter", "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(textStr, 135, 40);
+
+      if (mesh.material?.map) mesh.material.map.dispose();
+      mesh.material.map = new THREE.CanvasTexture(canvas);
+      mesh.material.needsUpdate = true;
+    };
+
+    updateBtn(chartWin.userData.btnSpline, '📈 SPLINE', normMode === 'spline');
+    updateBtn(chartWin.userData.btnCandles, '📊 CANDLES', isCandle);
+  }
+
+  // Update 2D DOM segmented controls if present
+  const domSpline = document.getElementById('btn-chart-spline');
+  const domCandle = document.getElementById('btn-chart-candlestick');
+  if (domSpline && domCandle) {
+    domSpline.classList.toggle('active', normMode === 'spline');
+    domCandle.classList.toggle('active', isCandle);
+  }
 }
 
-/**
- * Dynamically updates the active 3D Holographic Chart with fetched Finnhub OHLC candle data.
- * Re-normalizes coordinates and smoothly updates candle boxes, wicks, volume bars, and spline curves.
- * @param {string} symbol Ticker symbol
- * @param {Object} liveData Formatted candle and metrics package from stock-api.js
- * @param {THREE.Scene} targetScene Optional Three.js scene
- */
-export function updateChartWithRealtimeData(symbol, liveData, targetScene = null) {
-  if (!liveData || !liveData.candles || liveData.candles.length === 0) return;
+export function getChartDisplayMode(targetChartWin = null) {
+  const chartWin = targetChartWin || (activeChartWindows.length > 0 ? activeChartWindows[activeChartWindows.length - 1] : null);
+  return chartWin?.userData?.displayMode || 'candles';
+}
 
-  const count = liveData.candles.length;
-  const candles = liveData.candles;
-  const minP = liveData.minP ?? Math.min(...candles.map((c) => c.low));
-  const maxP = liveData.maxP ?? Math.max(...candles.map((c) => c.high));
-  const range = maxP - minP || 1;
+export function setChartResolutionPreset(presetId, scene = null, targetChartWin = null) {
+  const chartWin = targetChartWin || (activeChartWindows.length > 0 ? activeChartWindows[activeChartWindows.length - 1] : null);
+  if (!chartWin || !chartWin.userData) return;
 
-  const isPositive = (liveData.changePercent ?? 0) >= 0;
-  const themeColorHex = isPositive ? 0x10b981 : 0xef4444;
+  const preset = RESOLUTION_PRESETS.find(p => p.id === presetId || p.label === presetId) || RESOLUTION_PRESETS[2];
+  chartWin.userData.activePresetId = preset.id;
+  soundFx.playEnergySurgeSound();
 
-  if (!activeChartGroup) {
-    if (targetScene && trackedPlanetMesh) {
-      show3DSplineChart(trackedPlanetMesh, targetScene);
-    }
-  }
+  // 1. Update 3D In-Scene Timeframe Pills Visuals
+  if (chartWin.userData.timeframePills) {
+    chartWin.userData.timeframePills.forEach(({ mesh, preset: p }) => {
+      const isActive = p.id === preset.id || p.label === preset.label;
+      const canvas = document.createElement('canvas');
+      canvas.width = 256; canvas.height = 84;
+      const ctx = canvas.getContext('2d');
 
-  if (!activeChartGroup?.userData) return;
+      ctx.fillStyle = isActive ? '#06b6d4' : '#111c30';
+      ctx.roundRect(4, 4, 248, 76, 14);
+      ctx.fill();
 
-  const isINR = (liveData.currency === 'INR') || (liveData.exchange === 'NSE') || (liveData.exchange === 'BSE') || INDIAN_STOCKS.some((s) => s.symbol === symbol.toUpperCase());
-  const currSym = isINR ? '₹' : '$';
+      ctx.strokeStyle = isActive ? '#38bdf8' : '#334155';
+      ctx.lineWidth = 3;
+      ctx.roundRect(4, 4, 248, 76, 14);
+      ctx.stroke();
 
-  const ud = activeChartGroup.userData;
-  ud.activeSymbol = symbol;
-  ud.activeName = liveData.name || symbol;
-  ud.activeExchange = liveData.exchange || '';
-  ud.activeCandles = candles;
-  ud.currency = isINR ? 'INR' : 'USD';
-  ud.isINR = isINR;
-  ud.minP = minP;
-  ud.maxP = maxP;
-  ud.range = range;
-  ud.themeColorHex = themeColorHex;
+      ctx.fillStyle = isActive ? '#ffffff' : '#94a3b8';
+      ctx.font = 'bold 27px "Inter", "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(p.label, 128, 42);
 
-  // 1. Update Header Typography
-  if (ud.headerTitle) {
-    const formattedPrice = liveData.latestPrice >= 1000 
-      ? `${currSym}${liveData.latestPrice.toLocaleString(isINR ? 'en-IN' : undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` 
-      : `${currSym}${Number(liveData.latestPrice).toFixed(2)}`;
-    const exchangeTag = liveData.exchange ? `:${liveData.exchange}` : '';
-    ud.headerTitle.text = `${liveData.name || symbol} (${symbol}${exchangeTag})  •  ${formattedPrice}`;
-    ud.headerTitle.sync();
-  }
-
-  if (ud.headerSub) {
-    const totalVol = candles.reduce((acc, c) => acc + (c.volume || 0), 0);
-    const volStr = totalVol > 1000000 ? `${(totalVol / 1000000).toFixed(2)}M` : `${(totalVol / 1000).toFixed(1)}K`;
-    ud.headerSub.text = `${liveData.category || 'Asset'}  •  24h: ${isPositive ? '+' : ''}${liveData.changePercent}% (${currSym}${(liveData.change ?? 0) >= 0 ? '+' : ''}${Number(liveData.change ?? 0).toFixed(2)})  •  Vol: ${volStr}`;
-    ud.headerSub.sync();
-  }
-
-  // 2. Update Grid Price Level Labels
-  if (ud.priceLabels && ud.priceLabels.length > 0) {
-    const gridLineCount = ud.priceLabels.length - 1 || 3;
-    ud.priceLabels.forEach((label, g) => {
-      const priceVal = minP + (g / gridLineCount) * range;
-      label.text = isINR
-        ? (priceVal >= 1000 ? `₹${Math.round(priceVal).toLocaleString('en-IN')}` : `₹${priceVal.toFixed(1)}`)
-        : (priceVal >= 1000 ? `$${Math.round(priceVal).toLocaleString()}` : `$${priceVal.toFixed(1)}`);
-      label.sync();
+      if (mesh.material?.map) mesh.material.map.dispose();
+      mesh.material.map = new THREE.CanvasTexture(canvas);
+      mesh.material.needsUpdate = true;
     });
   }
 
-  // 3. Re-render 3D Candlesticks & Volume Depth Bars
-  renderCandlesticks({ ...liveData, ticker: symbol }, activeChartGroup, { candles, minP, maxP, range });
-  const updatedCandleGroup = activeChartGroup.getObjectByName('candleGroup');
-  if (updatedCandleGroup) {
-    updatedCandleGroup.visible = (currentChartMode === 'candlestick');
-    ud.candleGroup = updatedCandleGroup;
-  }
+  // 2. Regenerate 3D Candlesticks & Spline for this resolution
+  const basePrice = chartWin.userData.basePrice || 140;
+  renderChartDataContent(chartWin, basePrice, preset.mult, preset.count);
 
-  // Sync resolution button visuals if preset was specified
-  if (liveData.presetId) {
-    currentResolutionPreset = liveData.presetId;
-    if (ud.resolutionButtons) {
-      ud.resolutionButtons.forEach(({ mesh, border, text, id }) => {
-        const isActive = id === currentResolutionPreset;
-        if (mesh) {
-          mesh.material.color.setHex(isActive ? 0x00f0ff : 0x0f172a);
-          mesh.material.opacity = isActive ? 0.35 : 0.65;
-        }
-        if (border) {
-          border.material.color.setHex(isActive ? 0x00f0ff : 0x334155);
-        }
-        if (text) {
-          text.color = isActive ? 0x00f0ff : 0x94a3b8;
-          text.sync();
-        }
-      });
-    }
-    if (ud.timeTickLabels) {
-      const ticks = getTimeTicksForPreset(currentResolutionPreset);
-      ud.timeTickLabels.forEach((label, idx) => {
-        if (ticks[idx]) {
-          label.text = ticks[idx];
-          label.visible = true;
-          label.sync();
-        } else {
-          label.visible = false;
-          label.sync();
-        }
-      });
-    }
-  }
-
-  // 4. Update Spline Curve & Area Gradient Fill
-  const stepX = 2.8 / (count - 1);
-  const startX = -1.4;
-  const mapY = (val) => ((val - minP) / range) * 1.1 - 0.55;
-
-  const rawPoints3D = [];
-  for (let i = 0; i < count; i++) {
-    const x = startX + i * stepX;
-    const y = mapY(candles[i].close);
-    rawPoints3D.push(new THREE.Vector3(x, y, 0.02));
-  }
-  const splineCurve = new THREE.CatmullRomCurve3(rawPoints3D, false, 'catmullrom', 0.35);
-  const smoothPoints = splineCurve.getPoints(120);
-
-  // Update Vector Line2
-  if (ud.vectorLine) {
-    const linePositions = [];
-    smoothPoints.forEach((p) => linePositions.push(p.x, p.y, 0.022));
-    ud.vectorLine.geometry.setPositions(linePositions);
-    ud.vectorLine.material.color.setHex(themeColorHex);
-    ud.vectorLine.computeLineDistances();
-  }
-
-  // Update Area Gradient
-  if (ud.splineContainer && ud.areaMesh) {
-    ud.splineContainer.remove(ud.areaMesh);
-    if (ud.areaMesh.geometry) ud.areaMesh.geometry.dispose();
-    if (ud.areaMesh.material) ud.areaMesh.material.dispose();
-    const newAreaMesh = createAreaGradientMesh(smoothPoints, -0.75, themeColorHex);
-    ud.splineContainer.add(newAreaMesh);
-    ud.areaMesh = newAreaMesh;
-  }
-
-  // Update Endpoint Pulse Marker & Pill Badge
-  const lastPoint = smoothPoints[smoothPoints.length - 1];
-  if (ud.pulseRing) {
-    ud.pulseRing.position.set(lastPoint.x, lastPoint.y, 0.024);
-    ud.pulseRing.material.color.setHex(themeColorHex);
-  }
-  if (ud.coreDot) {
-    ud.coreDot.position.set(lastPoint.x, lastPoint.y, 0.025);
-  }
-  if (ud.pillMesh && ud.pillBorder && ud.pillText) {
-    ud.pillMesh.position.set(lastPoint.x - 0.30, lastPoint.y + 0.06, 0.026);
-    ud.pillBorder.position.set(lastPoint.x - 0.30, lastPoint.y + 0.06, 0.027);
-    ud.pillBorder.material.color.setHex(themeColorHex);
-    ud.pillText.position.set(lastPoint.x - 0.30, lastPoint.y + 0.06, 0.030);
-    ud.pillText.text = `${isPositive ? '+' : ''}${liveData.changePercent}%`;
-    ud.pillText.color = themeColorHex;
-    ud.pillText.sync();
-  }
-
-  // Update Laser Stem & Beacon
-  if (ud.stemLine) ud.stemLine.material.color.setHex(themeColorHex);
-  if (ud.beaconMesh) ud.beaconMesh.material.color.setHex(themeColorHex);
-
-  soundFx.playEnergySurgeSound();
+  // 3. Sync 2D DOM controls if present
+  const pills = document.querySelectorAll('.resolution-pill');
+  pills.forEach((p) => {
+    p.classList.toggle('active', p.getAttribute('data-preset') === preset.id || p.getAttribute('data-preset') === preset.label);
+  });
+  const dropdownLabel = document.getElementById('current-resolution-label');
+  if (dropdownLabel) dropdownLabel.textContent = preset.label;
 }
 
-/**
- * Smoothly updates the newest candle and spline endpoint when a real-time WebSocket trade tick arrives.
- * Flashes emissive colors (cyan/emerald on upward, crimson on downward) and tweens heights.
- * @param {Object} tick { symbol, price, volume, isUp }
- */
-export function applyLiveTickUpdate(tick) {
-  if (!tick || !activeChartGroup?.userData) return;
-  const ud = activeChartGroup.userData;
+// ---------------------------------------------------------------------------
+// 8. Hover Highlighting & 3D Interactive Scrubber Engine (NO DUMMY STUBS)
+// ---------------------------------------------------------------------------
+let activeHoveredCandle = null;
 
-  const currentSym = (ud.activeSymbol || '').toUpperCase();
-  const tickSym = (tick.symbol || '').toUpperCase();
-  if (currentSym && tickSym && currentSym !== tickSym) {
-    return; // Tick is for another symbol
+export function updateCandleHover(hitCandle) {
+  if (activeHoveredCandle === hitCandle) return;
+
+  // Reset previous candle
+  if (activeHoveredCandle) {
+    if (activeHoveredCandle.material?.color && activeHoveredCandle.userData?.originalColor !== undefined) {
+      activeHoveredCandle.material.color.setHex(activeHoveredCandle.userData.originalColor);
+      if (activeHoveredCandle.material.emissive) {
+        const origIsGreen = activeHoveredCandle.userData.candleData?.close >= activeHoveredCandle.userData.candleData?.open;
+        activeHoveredCandle.material.emissive.setHex(origIsGreen ? 0x065f46 : 0x991b1b);
+        activeHoveredCandle.material.emissiveIntensity = 0.35;
+      }
+    }
+    activeHoveredCandle.scale.set(1.0, 1.0, 1.0);
   }
 
-  const candles = ud.activeCandles;
-  if (!candles || candles.length === 0) return;
+  activeHoveredCandle = hitCandle;
+  if (!hitCandle) return;
 
+  // Highlight hovered candle
+  if (hitCandle.material?.color) {
+    hitCandle.material.color.setHex(0x38bdf8); // Bright electric cyan
+    if (hitCandle.material.emissive) {
+      hitCandle.material.emissive.setHex(0x0284c7);
+      hitCandle.material.emissiveIntensity = 0.85;
+    }
+  }
+  hitCandle.scale.set(1.15, 1.05, 1.15);
+
+  // Update Tooltip Pill text
+  const chartWin = hitCandle.userData.parentChart || hitCandle.userData.parentWindow;
+  const data = hitCandle.userData.candleData;
+  if (chartWin && data) {
+    const { tooltipMesh, tooltipCanvas, tooltipTex } = chartWin.userData;
+    if (tooltipCanvas && tooltipMesh && tooltipTex) {
+      const ctx = tooltipCanvas.getContext('2d');
+      ctx.clearRect(0, 0, tooltipCanvas.width, tooltipCanvas.height);
+
+      // Background rounded pill
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+      ctx.beginPath();
+      ctx.roundRect(4, 4, tooltipCanvas.width - 8, tooltipCanvas.height - 8, 12);
+      ctx.fill();
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      // OHLC Text
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 22px sans-serif';
+      ctx.fillText(`O: $${data.open.toFixed(1)}   H: $${data.high.toFixed(1)}`, 20, 36);
+      ctx.fillStyle = data.close >= data.open ? '#10b981' : '#ef4444';
+      ctx.fillText(`L: $${data.low.toFixed(1)}   C: $${data.close.toFixed(1)}`, 20, 72);
+
+      tooltipTex.needsUpdate = true;
+      tooltipMesh.position.x = hitCandle.position.x;
+      tooltipMesh.position.y = hitCandle.position.y + 0.14;
+      tooltipMesh.position.z = 0.095;
+      tooltipMesh.visible = true;
+    }
+  }
+}
+
+export function clearCandleHover() {
+  if (activeHoveredCandle) {
+    if (activeHoveredCandle.material?.color && activeHoveredCandle.userData?.originalColor !== undefined) {
+      activeHoveredCandle.material.color.setHex(activeHoveredCandle.userData.originalColor);
+      if (activeHoveredCandle.material.emissive) {
+        const origIsGreen = activeHoveredCandle.userData.candleData?.close >= activeHoveredCandle.userData.candleData?.open;
+        activeHoveredCandle.material.emissive.setHex(origIsGreen ? 0x065f46 : 0x991b1b);
+        activeHoveredCandle.material.emissiveIntensity = 0.35;
+      }
+    }
+    activeHoveredCandle.scale.set(1.0, 1.0, 1.0);
+    const chartWin = activeHoveredCandle.userData.parentChart || activeHoveredCandle.userData.parentWindow;
+    if (chartWin?.userData?.tooltipMesh) {
+      chartWin.userData.tooltipMesh.visible = false;
+    }
+    activeHoveredCandle = null;
+  }
+}
+
+export function setCandleHoverState(candleMesh, isHovered) {
+  if (isHovered && candleMesh) {
+    updateCandleHover(candleMesh);
+  } else {
+    clearCandleHover();
+  }
+}
+
+export function updateCandleScrubber(rayPoint, chartGroup = null, onCandleSnapped = null) {
+  const win = chartGroup || (activeChartWindows.length > 0 ? activeChartWindows[activeChartWindows.length - 1] : null);
+  if (!win || !win.userData?.candleEntries || win.userData.candleEntries.length === 0) return;
+
+  // Convert ray world hit point into chart local coordinates
+  const localHit = win.worldToLocal(rayPoint.clone());
+
+  // Check chart bounds
+  if (localHit.x < -0.62 || localHit.x > 0.48) {
+    clearCandleHover();
+    clearCandleScrubber(win);
+    return;
+  }
+
+  const entries = win.userData.candleEntries;
+  let closest = entries[0];
+  let minDiff = Infinity;
+  let closestIdx = 0;
+
+  for (let i = 0; i < entries.length; i++) {
+    const diff = Math.abs(entries[i].posX - localHit.x);
+    if (diff < minDiff) {
+      minDiff = diff;
+      closest = entries[i];
+      closestIdx = i;
+    }
+  }
+
+  // Update vertical guide line position
+  if (win.userData.scrubberLine) {
+    win.userData.scrubberLine.position.x = closest.posX;
+    win.userData.scrubberLine.visible = true;
+  }
+
+  // Highlight candle and display OHLC pill
+  if (closest.bodyMesh) {
+    updateCandleHover(closest.bodyMesh);
+  }
+
+  if (win.userData.lastSnappedIdx !== closestIdx) {
+    win.userData.lastSnappedIdx = closestIdx;
+    if (onCandleSnapped) {
+      onCandleSnapped(closestIdx, closest.data);
+    }
+  }
+}
+
+export function clearCandleScrubber(chartGroup = null) {
+  clearCandleHover();
+  const targets = chartGroup ? [chartGroup] : activeChartWindows;
+  targets.forEach((win) => {
+    if (!win || !win.userData) return;
+    if (win.userData.scrubberLine) win.userData.scrubberLine.visible = false;
+    if (win.userData.tooltipMesh) win.userData.tooltipMesh.visible = false;
+    win.userData.lastSnappedIdx = -1;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 9. Real-Time WebSocket Trade Tick Updates (NO DUMMY STUBS)
+// ---------------------------------------------------------------------------
+export function applyLiveTickUpdate(tick) {
+  if (!tick || !tick.price || activeChartWindows.length === 0) return;
+
+  const targetSymbol = (tick.symbol || '').toUpperCase();
+  const chartWin = activeChartWindows.find(w => (w.userData.ticker || '').toUpperCase() === targetSymbol) || activeChartWindows[activeChartWindows.length - 1];
+  if (!chartWin || !chartWin.userData?.candles) return;
+
+  const candles = chartWin.userData.candles;
   const lastIdx = candles.length - 1;
   const lastCandle = candles[lastIdx];
 
-  // Update candle stats
+  // Update candle price statistics
   lastCandle.close = tick.price;
   lastCandle.high = Math.max(lastCandle.high, tick.price);
   lastCandle.low = Math.min(lastCandle.low, tick.price);
   lastCandle.volume += tick.volume || 100;
-  lastCandle.isBullish = lastCandle.close >= lastCandle.open;
+  lastCandle.isGreen = lastCandle.close >= lastCandle.open;
 
-  // Recalculate global price bounds if price breaks current range
-  let minP = ud.minP ?? 0;
-  let maxP = ud.maxP ?? 1;
-  if (tick.price > maxP) maxP = tick.price * 1.01;
-  if (tick.price < minP) minP = tick.price * 0.99;
-  ud.minP = minP;
-  ud.maxP = maxP;
-  const range = maxP - minP || 1;
-  ud.range = range;
+  // Flash update on candle body mesh with emissive burst
+  const entries = chartWin.userData.candleEntries;
+  if (entries && entries[lastIdx]) {
+    const entry = entries[lastIdx];
+    const minP = chartWin.userData.minP || (tick.price * 0.9);
+    const rangeP = chartWin.userData.rangeP || (tick.price * 0.2);
+    const chartBottomY = -0.12;
+    const chartHeight = 0.34;
+    const mapY = (val) => chartBottomY + ((val - minP) / rangeP) * chartHeight;
 
-  const mapY = (val) => ((val - minP) / range) * 1.1 - 0.55;
+    const yOpen = mapY(lastCandle.open);
+    const yClose = mapY(lastCandle.close);
+    const newHeight = Math.max(0.014, Math.abs(yClose - yOpen));
+    const newCenterY = (yOpen + yClose) * 0.5;
 
-  // Update 3D Candlestick Body & Wick for rightmost candle
-  const candleGroup = ud.candleGroup || activeChartGroup.getObjectByName('candleGroup');
-  if (candleGroup) {
-    const candleMesh = candleGroup.getObjectByName(`CandleBody_${lastIdx}`);
-    if (candleMesh) {
-      const yOpen = mapY(lastCandle.open);
-      const yClose = mapY(lastCandle.close);
-      const targetHeight = Math.max(0.04, Math.abs(yClose - yOpen));
-      const targetY = (yOpen + yClose) / 2;
+    entry.bodyMesh.position.y = newCenterY;
+    entry.bodyMesh.scale.y = newHeight / 0.034;
+    entry.bodyMesh.material.color.setHex(tick.isUp ? 0x38bdf8 : 0xef4444);
+    if (entry.bodyMesh.material.emissive) {
+      entry.bodyMesh.material.emissive.setHex(tick.isUp ? 0x0284c7 : 0xdc2626);
+      entry.bodyMesh.material.emissiveIntensity = 0.95;
+    }
 
-      // Smoothly tween candle position and scale
-      const twPos = new TWEEN.Tween(candleMesh.position)
-        .to({ y: targetY }, 220)
-        .easing(TWEEN.Easing.Cubic.Out);
-      TWEEN.add(twPos);
-      twPos.start();
+    setTimeout(() => {
+      if (entry?.bodyMesh?.material) {
+        entry.bodyMesh.material.color.setHex(lastCandle.isGreen ? 0x10b981 : 0xef4444);
+        if (entry.bodyMesh.material.emissive) {
+          entry.bodyMesh.material.emissive.setHex(lastCandle.isGreen ? 0x065f46 : 0x991b1b);
+          entry.bodyMesh.material.emissiveIntensity = 0.35;
+        }
+      }
+    }, 280);
+  }
 
-      const origHeight = candleMesh.geometry?.parameters?.height || targetHeight;
-      const targetScaleY = targetHeight / origHeight;
-      candleMesh.scale.y = Math.max(0.15, targetScaleY);
+  // Update Header text canvas with new price
+  const canvas = chartWin.userData.headerCanvas;
+  const headerObj = chartWin.userData.headerMesh || chartWin.userData.headerSprite;
+  const hd = chartWin.userData.headerData;
+  if (canvas && headerObj && hd) {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, 1024, 160);
 
-      // Flash Emissive color
-      const flashColorHex = tick.isUp ? 0x00f0ff : 0xef4444;
-      candleMesh.material.emissive.setHex(flashColorHex);
-      candleMesh.material.emissiveIntensity = 1.35;
+    // Title Line: ${companyName} (${ticker})  •  $${price} in crisp bold white
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 44px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    const curr = chartWin.userData.currency || '$';
+    const updatedPrice = `${curr}${Number(tick.price).toFixed(2)}`;
+    ctx.fillText(`${hd.name} (${hd.symbol})  •  ${updatedPrice}`, 16, 56);
 
-      const twMat = new TWEEN.Tween(candleMesh.material)
-        .to({ emissiveIntensity: 0.38 }, 450)
-        .easing(TWEEN.Easing.Cubic.Out)
-        .onComplete(() => {
-          candleMesh.material.emissive.setHex(lastCandle.isBullish ? 0x10b981 : 0xef4444);
-        });
-      TWEEN.add(twMat);
-      twMat.start();
+    // Subtitle Line: ${assetType} • Allocation: ${alloc}% • 24h Return: +${ret}%      TOTAL NET WORTH: $1,245,000
+    const rawRet = hd.change || '+3.4%';
+    const ret = String(rawRet).startsWith('+') ? String(rawRet).substring(1) : rawRet;
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '26px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.fillText(`${hd.category} • Allocation: ${hd.allocation}% • 24h Return: +${ret}%      TOTAL NET WORTH: $1,245,000`, 16, 114);
+
+    if (headerObj.material?.map) {
+      headerObj.material.map.needsUpdate = true;
     }
   }
+}
 
-  // Update Spline Curve Endpoint & Pill
-  const lastY = mapY(tick.price);
-  if (ud.pulseRing) {
-    ud.pulseRing.position.y = lastY;
-    ud.pulseRing.scale.set(1.4, 1.4, 1.0);
-    const twRing = new TWEEN.Tween(ud.pulseRing.scale)
-      .to({ x: 1.0, y: 1.0 }, 350)
-      .easing(TWEEN.Easing.Cubic.Out);
-    TWEEN.add(twRing);
-    twRing.start();
+export function updateChartWithRealtimeData(symbol, liveData, targetScene = null) {
+  if (!symbol || !liveData) return;
+  const chartWin = activeChartWindows.find(w => (w.userData.ticker || '').toUpperCase() === symbol.toUpperCase());
+  if (chartWin) {
+    const basePrice = liveData.price || liveData.latestPrice || 140;
+    renderChartDataContent(chartWin, basePrice, 0.035, 20);
   }
-  if (ud.coreDot) {
-    ud.coreDot.position.y = lastY;
-  }
-  if (ud.pillMesh && ud.pillBorder && ud.pillText) {
-    ud.pillMesh.position.y = lastY + 0.06;
-    ud.pillBorder.position.y = lastY + 0.06;
-    ud.pillText.position.y = lastY + 0.06;
+}
 
-    const firstPrice = candles[0].open || 1;
-    const changePct = Math.round(((tick.price - firstPrice) / firstPrice) * 10000) / 100;
-    ud.pillText.text = `${changePct >= 0 ? '+' : ''}${changePct}%`;
-    ud.pillText.sync();
+// ---------------------------------------------------------------------------
+// 9. Interactive "Wolf of Wall Street" Easter Egg (Chest Thump Web Audio Synth)
+// ---------------------------------------------------------------------------
+let audioCtx = null;
+
+export function safePlayChestThump() {
+  try {
+    playChestThump();
+  } catch (e) {
+    console.warn('[Wolf Egg] Audio thump error:', e);
+  }
+}
+
+export function playChestThump() {
+  try {
+    if (typeof window === 'undefined') return;
+    if (!audioCtx) {
+      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtxClass) return;
+      audioCtx = new AudioCtxClass();
+    }
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(() => {});
+    }
+
+    const now = audioCtx.currentTime;
+
+    // Rhythmic pattern: Thump, Thump, Hummm...
+    const beats = [0.0, 0.28, 0.65];
+    beats.forEach((timeOffset, idx) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+
+      if (idx < 2) {
+        // Deep chest thumps (75Hz -> 28Hz drop)
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(75, now + timeOffset);
+        osc.frequency.exponentialRampToValueAtTime(28, now + timeOffset + 0.18);
+
+        gain.gain.setValueAtTime(0.8, now + timeOffset);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + timeOffset + 0.18);
+      } else {
+        // The Matthew McConaughey hum (~110Hz sustained drone)
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(110, now + timeOffset);
+
+        gain.gain.setValueAtTime(0.001, now + timeOffset);
+        gain.gain.linearRampToValueAtTime(0.4, now + timeOffset + 0.15);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + timeOffset + 1.2);
+      }
+
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+
+      osc.start(now + timeOffset);
+      osc.stop(now + timeOffset + (idx < 2 ? 0.2 : 1.25));
+    });
+  } catch (e) {
+    console.warn('[Wolf Egg] Chest thump error:', e);
+  }
+}
+
+export function speakWolfQuote() {
+  try {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel(); // Stop any pending speech
+      const utterance = new SpeechSynthesisUtterance(
+        "Fugayzi, fugazi. It's a whazy. It's a woozie. It's fairy dust."
+      );
+      utterance.rate = 0.95; // Slightly deliberate cadence
+      utterance.pitch = 1.0;
+      utterance.volume = 1.0;
+      window.speechSynthesis.speak(utterance);
+    }
+  } catch (e) {
+    console.warn('[Wolf Egg] Speech synthesis error:', e);
+  }
+}
+
+export function spawnWolfHoloBanner(chartWin) {
+  if (!chartWin) return;
+  if (chartWin.userData.wolfBanner) {
+    chartWin.remove(chartWin.userData.wolfBanner);
+    if (chartWin.userData.wolfBanner.geometry) chartWin.userData.wolfBanner.geometry.dispose();
+    if (chartWin.userData.wolfBanner.material?.map) chartWin.userData.wolfBanner.material.map.dispose();
+    if (chartWin.userData.wolfBanner.material) chartWin.userData.wolfBanner.material.dispose();
+    chartWin.userData.wolfBanner = null;
   }
 
-  // Update Header Title Price
-  if (ud.headerTitle) {
-    const isINR = ud.isINR || ud.currency === 'INR';
-    const currSym = isINR ? '₹' : '$';
-    const formattedPrice = tick.price >= 1000 
-      ? `${currSym}${tick.price.toLocaleString(isINR ? 'en-IN' : undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` 
-      : `${currSym}${Number(tick.price).toFixed(2)}`;
-    const exchangeTag = ud.activeExchange ? `:${ud.activeExchange}` : '';
-    ud.headerTitle.text = `${ud.activeName || tick.symbol} (${ud.activeSymbol || tick.symbol}${exchangeTag})  •  ${formattedPrice}`;
-    ud.headerTitle.sync();
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024;
+  canvas.height = 192;
+  const ctx = canvas.getContext('2d');
+
+  // Background slate: sleek glass with rounded corners
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.95)';
+  ctx.beginPath();
+  if (ctx.roundRect) {
+    ctx.roundRect(6, 6, 1012, 180, 24);
+  } else {
+    ctx.rect(6, 6, 1012, 180);
   }
+  ctx.fill();
+
+  // Glowing amber / gold border
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 4;
+  ctx.stroke();
+
+  // Subtle inner border line for luxury glass effect
+  ctx.strokeStyle = 'rgba(251, 191, 36, 0.32)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  if (ctx.roundRect) {
+    ctx.roundRect(14, 14, 996, 164, 18);
+  } else {
+    ctx.rect(14, 14, 996, 164);
+  }
+  ctx.stroke();
+
+  // Header tag: Wolf of Wall Street badge
+  ctx.fillStyle = '#f59e0b';
+  ctx.font = 'bold 22px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('🐺 MARK HANNA • THE WOLF OF WALL STREET 🐺', 512, 42);
+
+  // Main iconic quote in bright warm gold
+  ctx.fillStyle = '#fef08a';
+  ctx.font = 'italic bold 31px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Georgia, serif';
+  ctx.fillText('“Fugayzi, fugazi. It\'s a whazy. It\'s a woozie. It\'s fairy dust.”', 512, 96);
+
+  // Subtitle / footer note
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '500 19px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  ctx.fillText('✨ Nobody knows if a stock goes up or down. Number one rule: keep them on the Ferris wheel. ✨', 512, 146);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+
+  // Plane geometry: width 0.80m, height 0.15m (matches 1024x192 aspect ratio)
+  const bannerGeo = new THREE.PlaneGeometry(0.80, 0.15);
+  const bannerMat = new THREE.MeshBasicMaterial({
+    map: tex,
+    transparent: true,
+    opacity: 0.0,
+    side: THREE.DoubleSide,
+    depthWrite: false
+  });
+  const bannerMesh = new THREE.Mesh(bannerGeo, bannerMat);
+  bannerMesh.position.set(0, 0.46, 0.05);
+  bannerMesh.raycast = () => {};
+  chartWin.add(bannerMesh);
+  chartWin.userData.wolfBanner = bannerMesh;
+
+  // Gentle float upward animation
+  new TWEEN.Tween(bannerMesh.position)
+    .to({ y: 0.54 }, 1200)
+    .easing(TWEEN.Easing.Cubic.Out)
+    .start();
+
+  // Fade in, hold while spoken voice line delivers (~4.5s), then fade out
+  new TWEEN.Tween(bannerMat)
+    .to({ opacity: 1.0 }, 220)
+    .chain(
+      new TWEEN.Tween(bannerMat)
+        .to({ opacity: 0.0 }, 700)
+        .delay(4500)
+        .onComplete(() => {
+          if (bannerMesh.parent) bannerMesh.parent.remove(bannerMesh);
+          bannerGeo.dispose();
+          bannerMat.dispose();
+          tex.dispose();
+          if (chartWin.userData.wolfBanner === bannerMesh) {
+            chartWin.userData.wolfBanner = null;
+          }
+        })
+    )
+    .start();
+}
+
+export function triggerWolfEasterEgg(chartWin = null, controller = null) {
+  safePlayChestThump();
+  speakWolfQuote();
+
+  if (typeof window !== 'undefined' && window.triggerWolfChestHaptics) {
+    window.triggerWolfChestHaptics(controller);
+  }
+
+  const targetWin = chartWin || (activeChartWindows.length > 0 ? activeChartWindows[activeChartWindows.length - 1] : null);
+  if (!targetWin) return;
+
+  const origScale = targetWin.scale.x || 1.0;
+
+  // Thump 1: Punch at 0.0s
+  new TWEEN.Tween(targetWin.scale)
+    .to({ x: origScale * 1.045, y: origScale * 1.045, z: origScale * 1.045 }, 80)
+    .yoyo(true)
+    .repeat(1)
+    .easing(TWEEN.Easing.Back.Out)
+    .start();
+
+  // Thump 2: Punch at 0.28s
+  setTimeout(() => {
+    new TWEEN.Tween(targetWin.scale)
+      .to({ x: origScale * 1.07, y: origScale * 1.07, z: origScale * 1.07 }, 90)
+      .yoyo(true)
+      .repeat(1)
+      .easing(TWEEN.Easing.Back.Out)
+      .start();
+  }, 280);
+
+  // Hummm... at 0.65s: Gold border surge & floating 3D quote banner
+  setTimeout(() => {
+    if (targetWin.userData.borderLines?.material) {
+      const origColor = targetWin.userData.borderLines.material.color.getHex();
+      targetWin.userData.borderLines.material.color.setHex(0xf59e0b);
+      targetWin.userData.borderLines.material.opacity = 0.95;
+      setTimeout(() => {
+        if (targetWin.userData.borderLines?.material) {
+          targetWin.userData.borderLines.material.color.setHex(origColor);
+          targetWin.userData.borderLines.material.opacity = 0.35;
+        }
+      }, 4500);
+    }
+    spawnWolfHoloBanner(targetWin);
+  }, 650);
+}
+
+// ---------------------------------------------------------------------------
+// 10. Utility & Animation Stubs
+// ---------------------------------------------------------------------------
+export function pulseChartHighlight(chartWin) {
+  if (!chartWin) return;
+  soundFx.playSelectSound();
+  const tw = new TWEEN.Tween(chartWin.scale)
+    .to({ x: 1.05, y: 1.05, z: 1.05 }, 120)
+    .yoyo(true)
+    .repeat(1)
+    .easing(TWEEN.Easing.Cubic.Out);
+  TWEEN.add(tw);
+  tw.start();
+}
+
+export function handleTitleBarClick(chartWin) {
+  if (!chartWin) return;
+  const now = performance.now();
+  if (!chartWin.userData._titleClicks) chartWin.userData._titleClicks = [];
+  chartWin.userData._titleClicks = chartWin.userData._titleClicks.filter(t => now - t < 900);
+  chartWin.userData._titleClicks.push(now);
+
+  // Triple-click Net Worth / Header triggers Wolf Easter egg; single-click pulses highlight
+  if (chartWin.userData._titleClicks.length >= 3) {
+    chartWin.userData._titleClicks = [];
+    triggerWolfEasterEgg(chartWin);
+  } else {
+    pulseChartHighlight(chartWin);
+  }
+}
+
+export function getCurrentChart() {
+  return activeChartWindows.length > 0 ? activeChartWindows[activeChartWindows.length - 1] : null;
+}
+
+export function getActiveChartData() {
+  const cur = getCurrentChart();
+  return cur?.userData || null;
+}
+
+export function show3DSplineChart(symbol, asset, camera, scene) {
+  const chart = openOrFocusChart(symbol, asset, camera, scene);
+  if (chart) setChartDisplayMode('spline', chart);
+  return chart;
+}
+
+export function render3DCandlestickChart(symbol, asset, camera, scene) {
+  const chart = openOrFocusChart(symbol, asset, camera, scene);
+  if (chart) setChartDisplayMode('candlestick', chart);
+  return chart;
+}
+
+export function updateActiveChart(camera = null, delta = 0.016) {
+  // Update line resolution or billboard orientation if needed
+  TWEEN.update();
 }

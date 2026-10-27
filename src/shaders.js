@@ -179,12 +179,23 @@ export function createRayleighAtmosphereMaterial(colorHex = 0x38bdf8, rimPower =
 }
 
 /**
- * Deep Cosmic Emission Nebula & Space Dust backdrop.
+ * Deep Cosmic Emission Nebula & Space Dust backdrop with dynamic galaxy theme color uniforms.
  */
-export function createNebulaBackdropMaterial() {
+export function createNebulaBackdropMaterial(config = {}) {
+  const voidCol = new THREE.Color(config.voidColor || 0x020617);
+  const neb1Col = new THREE.Color(config.nebula1 || 0x0369a1);
+  const neb2Col = new THREE.Color(config.nebula2 || 0x4338ca);
+  const hazeCol = new THREE.Color(config.haze || 0x06b6d4);
+  const speed = config.speed !== undefined ? config.speed : 1.0;
+
   return new THREE.ShaderMaterial({
     uniforms: {
-      uTime: { value: 0 }
+      uTime: { value: 0 },
+      uColorVoid: { value: voidCol },
+      uColorNebula1: { value: neb1Col },
+      uColorNebula2: { value: neb2Col },
+      uColorHaze: { value: hazeCol },
+      uSpeed: { value: speed }
     },
     vertexShader: `
       varying vec3 vWorldPosition;
@@ -195,26 +206,28 @@ export function createNebulaBackdropMaterial() {
     `,
     fragmentShader: `
       uniform float uTime;
+      uniform vec3 uColorVoid;
+      uniform vec3 uColorNebula1;
+      uniform vec3 uColorNebula2;
+      uniform vec3 uColorHaze;
+      uniform float uSpeed;
+
       varying vec3 vWorldPosition;
 
       void main() {
         vec3 dir = normalize(vWorldPosition);
+        float t = uTime * uSpeed;
 
-        float n1 = sin(dir.x * 3.5 + uTime * 0.02) * cos(dir.y * 3.5 + uTime * 0.015) * sin(dir.z * 3.5);
-        float n2 = sin(dir.x * 7.0 - uTime * 0.025) * sin(dir.y * 7.0 + uTime * 0.018) * cos(dir.z * 7.0);
-        float n3 = cos((dir.x + dir.y) * 12.0) * sin(dir.z * 12.0 + uTime * 0.01);
-
-        vec3 voidSpace = vec3(0.005, 0.008, 0.018);
-        vec3 deepBlueNebula = vec3(0.018, 0.06, 0.18);
-        vec3 magentaNebula = vec3(0.14, 0.025, 0.12);
-        vec3 cyanHaze = vec3(0.01, 0.14, 0.20);
+        float n1 = sin(dir.x * 3.5 + t * 0.02) * cos(dir.y * 3.5 + t * 0.015) * sin(dir.z * 3.5);
+        float n2 = sin(dir.x * 7.0 - t * 0.025) * sin(dir.y * 7.0 + t * 0.018) * cos(dir.z * 7.0);
+        float n3 = cos((dir.x + dir.y) * 12.0) * sin(dir.z * 12.0 + t * 0.01);
 
         float m1 = smoothstep(-0.15, 0.65, n1 + n3 * 0.2);
         float m2 = smoothstep(-0.25, 0.75, n2);
 
-        vec3 color = mix(voidSpace, deepBlueNebula, m1);
-        color = mix(color, magentaNebula, m2 * 0.55);
-        color += cyanHaze * max(0.0, n3 * 0.25);
+        vec3 color = mix(uColorVoid, uColorNebula1, m1);
+        color = mix(color, uColorNebula2, m2 * 0.55);
+        color += uColorHaze * max(0.0, n3 * 0.28);
 
         gl_FragColor = vec4(color, 1.0);
       }
@@ -223,3 +236,4 @@ export function createNebulaBackdropMaterial() {
     depthWrite: false
   });
 }
+

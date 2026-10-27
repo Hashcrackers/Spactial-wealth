@@ -13,6 +13,8 @@ import * as TWEEN from '@tweenjs/tween.js';
 
 import {
   portfolioState,
+  currentMarket,
+  switchMarket,
   subscribePortfolio,
   loadPresetProfile,
   addAsset,
@@ -26,6 +28,7 @@ import {
   renderAssetNodes,
   createCentralSun,
   createOrbitPaths,
+  applySectorGhosting,
   createCashFlowStream,
   createExpenseOutflowStream,
   billboardLabels,
@@ -34,6 +37,18 @@ import {
   updateCelestialAnimations
 } from './nodes.js';
 import { createNebulaBackdropMaterial } from './shaders.js';
+import {
+  GALAXY_THEMES,
+  setGalaxyTheme,
+  getCurrentGalaxyTheme,
+  registerSceneEnvironment,
+  createDynamicCosmicStarfield,
+  updateGalaxyEnvironment,
+  setSectorThemeSync,
+  setPassthroughMode,
+  getPassthroughMode,
+  tabletopPivot
+} from './scene.js';
 import {
   show3DSplineChart,
   render3DCandlestickChart,
@@ -46,8 +61,21 @@ import {
   setChartDisplayMode,
   getChartDisplayMode,
   setCandleHoverState,
+  updateCandleHover,
+  clearCandleHover,
+  updateCandleScrubber,
+  clearCandleScrubber,
   setChartResolutionPreset,
-  RESOLUTION_PRESETS
+  RESOLUTION_PRESETS,
+  activeChartWindows,
+  closeChartWindow,
+  closeHitboxRegistry,
+  openOrFocusChart,
+  spawnOrFocusChart,
+  pulseChartHighlight,
+  triggerWolfEasterEgg,
+  handleTitleBarClick,
+  setChartsScene
 } from './charts.js';
 import {
   searchTickers,
@@ -66,11 +94,15 @@ let activeLiveSymbol = null;
    ========================================================================== */
 let scene, camera, renderer, composer, bloomPass, controls;
 let xrManager;
+let solarSystemGroup, tabletopBaseDisc, activeTabletopTween;
+let isPassthroughMode = false;
 let centralSun, nebulaDome, orbitPathsGroup, cashFlowStream, expenseStream;
+let ambientLight, coreLight, keyLight, galacticRim, cosmicStarfieldGroup;
 let dustCloudParticles, dustPositions, dustOriginalY;
 let mouseRaycaster, mousePointer;
 let hoveredMesh = null;
 let hoveredCandleMesh = null;
+let cachedPlanetInteractive = null;
 let selectedPlanetMesh = null;
 let currentCategory = 'ALL';
 let isAutoOrbiting = true;
@@ -123,7 +155,7 @@ function init() {
   renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: true,
-    alpha: false,
+    alpha: true,
     powerPreference: 'high-performance'
   });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -150,41 +182,99 @@ function init() {
   setupPhysicalLighting();
   setupNebulaSkybox();
   setupVolumetricDustCloud();
-  setupCosmicStarfield();
+  cosmicStarfieldGroup = createDynamicCosmicStarfield(scene);
 
-  // 6. Photorealistic Celestial Ecosystem
+  if (typeof window !== 'undefined') {
+    window.skyboxMesh = nebulaDome;
+    window.spaceParticles = cosmicStarfieldGroup;
+    window.baseRingMesh = baseRingMesh;
+    window.tabletopPivot = tabletopPivot;
+    window.hasAnchoredToTable = false;
+    window.scene = scene;
+    setChartsScene(scene);
+  }
+
+  // 6. Photorealistic Celestial Ecosystem & Tabletop Solar System Root
+  solarSystemGroup = new THREE.Group();
+  solarSystemGroup.name = 'SolarSystemGroup';
+  if (typeof window !== 'undefined') {
+    window.solarSystemGroup = solarSystemGroup;
+  }
+  scene.add(tabletopPivot);
+  tabletopPivot.add(solarSystemGroup);
+
   centralSun = createCentralSun(portfolioState.summary);
-  scene.add(centralSun);
+  centralSun.userData.isTabletopAnchor = true;
+  centralSun.userData.isGrabbable = true;
+  solarSystemGroup.add(centralSun);
 
-  scene.add(planetsGroup);
+  // Futuristic Tabletop Holographic Base Disc (Desk Anchor Dock)
+  const baseRingGeo = new THREE.RingGeometry(1.5, 2.7, 64);
+  const baseRingMat = new THREE.MeshBasicMaterial({
+    color: 0x00f0ff,
+    side: THREE.DoubleSide,
+    transparent: true,
+    opacity: 0.25,
+    blending: THREE.AdditiveBlending
+  });
+  tabletopBaseDisc = new THREE.Mesh(baseRingGeo, baseRingMat);
+  tabletopBaseDisc.rotation.x = Math.PI / 2;
+  tabletopBaseDisc.position.y = -0.15;
+  tabletopBaseDisc.name = 'TabletopBaseDisc';
+  tabletopBaseDisc.userData = { isTabletopAnchor: true, isInteractive: true, isDraggableBase: true };
+  if (typeof window !== 'undefined') {
+    window.tabletopBaseDisc = tabletopBaseDisc;
+  }
+  solarSystemGroup.add(tabletopBaseDisc);
+
+  solarSystemGroup.add(planetsGroup);
   renderAssetNodes(portfolioState.assets, 'ALL');
 
-  orbitPathsGroup = createOrbitPaths(portfolioState.assets, 'ALL');
-  scene.add(orbitPathsGroup);
+  orbitPathsGroup = createOrbitPaths(portfolioState.assets, 'ALL', getCurrentGalaxyTheme());
+  solarSystemGroup.add(orbitPathsGroup);
 
   // 7. Budget Cash-Flow Particle Streams (Accretion & Polar Outflow Jets)
-  cashFlowStream = createCashFlowStream(scene);
-  expenseStream = createExpenseOutflowStream(scene);
+  cashFlowStream = createCashFlowStream(solarSystemGroup);
+  expenseStream = createExpenseOutflowStream(solarSystemGroup);
 
-  // 8. Raycasting
+  // 8. Register Scene Environment with Galaxy Theme Engine
+  registerSceneEnvironment({
+    scene,
+    nebulaDome,
+    centralSun,
+    ambientLight,
+    coreLight,
+    keyLight,
+    galacticRim,
+    starfield: cosmicStarfieldGroup,
+    dustCloud: dustCloudParticles
+  });
+  setGalaxyTheme('US_WALLSTREET', 0);
+
+  // 9. Raycasting
   mouseRaycaster = new THREE.Raycaster();
   mousePointer = new THREE.Vector2();
 
-  // 8. WebXR Manager Setup
+  // 10. WebXR Manager Setup
   xrManager = new XRManager(renderer, scene, camera, {
     getInteractiveObjects: () => {
-      const objects = [];
-      planetsGroup.traverse((child) => {
-        if (child.userData?.isAssetNode) objects.push(child);
-      });
-      const chart = getCurrentChart();
-      if (chart) {
-        chart.traverse((child) => {
-          if (child.userData?.isCloseButton || child.userData?.isChartModeToggle || child.userData?.isCandle || child.userData?.isResolutionPreset || child.userData?.isVRButton || child.userData?.onClick || child.userData?.isInteractive) {
-            objects.push(child);
+      if (!cachedPlanetInteractive && planetsGroup) {
+        cachedPlanetInteractive = [];
+        planetsGroup.traverse((child) => {
+          if (child.userData?.isAssetNode && (child.isMesh || child.userData?.primaryMesh)) {
+            cachedPlanetInteractive.push(child);
           }
         });
       }
+      const objects = [...(cachedPlanetInteractive || [])];
+      activeChartWindows.forEach((win) => {
+        if (win.userData?.titleBar) objects.push(win.userData.titleBar);
+        if (win.userData?.closeBtn) objects.push(win.userData.closeBtn);
+        if (win.userData?.glassPanel) objects.push(win.userData.glassPanel);
+        if (win.userData?.registeredButtons) {
+          win.userData.registeredButtons.forEach((b) => objects.push(b));
+        }
+      });
       return objects;
     },
     onSelectNode: (asset, mesh) => selectPlanet(mesh),
@@ -195,6 +285,9 @@ function init() {
     onToggleOrbit: () => toggleAutoOrbit(),
     onToggleFlowMode: () => toggleFlowMode(),
     onToggleAudio: () => toggleAudioEngine(),
+    onSetMode: (mode) => handleSetMode(mode),
+    onTogglePassthrough: (isActive) => handleSetMode(isActive ? 'MR' : 'VR'),
+    onSwitchMarket: (marketKey) => handleSwitchMarket(marketKey),
     onToggleChart: () => {
       if (getCurrentChart()) {
         handleCloseChart();
@@ -238,14 +331,15 @@ function init() {
       selectStockSymbol(symbol, stockData);
     }
   });
+  xrManager.setSolarSystemGroup(solarSystemGroup);
 
-  // 9. DOM Event Listeners
+  // 11. DOM Event Listeners
   setupEventListeners();
 
-  // 10. Portfolio Data Subscription
+  // 12. Portfolio Data Subscription
   subscribePortfolio(onPortfolioChanged);
 
-  // 11. Render Loop
+  // 13. Render Loop
   renderer.setAnimationLoop(renderLoop);
 }
 
@@ -275,11 +369,11 @@ function setupPostProcessing() {
    ========================================================================== */
 function setupPhysicalLighting() {
   // Deep space ambient fill
-  const ambient = new THREE.AmbientLight(0x0f172a, 1.2);
-  scene.add(ambient);
+  ambientLight = new THREE.AmbientLight(0x0b1528, 1.25);
+  scene.add(ambientLight);
 
   // Central stellar point light with physical inverse-square decay
-  const coreLight = new THREE.PointLight(0xfff7ed, 5.2, 85, 1.15);
+  coreLight = new THREE.PointLight(0xe0f2fe, 5.2, 85, 1.15);
   coreLight.position.set(0, 0, 0);
   coreLight.castShadow = true;
   coreLight.shadow.mapSize.width = 2048;
@@ -288,7 +382,7 @@ function setupPhysicalLighting() {
   scene.add(coreLight);
 
   // Distant celestial key light for shadow contrast
-  const keyLight = new THREE.DirectionalLight(0x94a3b8, 1.4);
+  keyLight = new THREE.DirectionalLight(0x38bdf8, 1.5);
   keyLight.position.set(22, 35, 18);
   keyLight.castShadow = true;
   keyLight.shadow.mapSize.width = 1024;
@@ -296,14 +390,20 @@ function setupPhysicalLighting() {
   scene.add(keyLight);
 
   // Galactic rim fill light
-  const galacticRim = new THREE.DirectionalLight(0x38bdf8, 0.85);
+  galacticRim = new THREE.DirectionalLight(0x0284c7, 0.95);
   galacticRim.position.set(-20, -10, -25);
   scene.add(galacticRim);
 }
 
 function setupNebulaSkybox() {
   const domeGeo = new THREE.SphereGeometry(220, 32, 32);
-  const domeMat = createNebulaBackdropMaterial();
+  const domeMat = createNebulaBackdropMaterial({
+    voidColor: 0x020617,
+    nebula1: 0x0369a1,
+    nebula2: 0x312e81,
+    haze: 0x06b6d4,
+    speed: 1.2
+  });
   nebulaDome = new THREE.Mesh(domeGeo, domeMat);
   nebulaDome.name = 'NebulaDome';
   scene.add(nebulaDome);
@@ -363,28 +463,48 @@ function setupVolumetricDustCloud() {
   scene.add(dustCloudParticles);
 }
 
-function setupCosmicStarfield() {
-  const starCount = 1500;
-  const geometry = new THREE.BufferGeometry();
-  const positions = new Float32Array(starCount * 3);
+/**
+ * Handles switching between country stock markets: India (Bharat) vs US (Wall Street).
+ * @param {'IN'|'US'} marketKey
+ */
+export function handleSwitchMarket(marketKey) {
+  const m = (marketKey || 'US').toUpperCase();
+  const isIN = m === 'IN' || m === 'BHARAT';
 
-  for (let i = 0; i < starCount * 3; i += 3) {
-    positions[i] = (Math.random() - 0.5) * 160;
-    positions[i + 1] = (Math.random() - 0.5) * 80 + 10;
-    positions[i + 2] = (Math.random() - 0.5) * 160;
+  // 1. Switch Portfolio Preset & Currency
+  switchMarket(isIN ? 'IN' : 'US');
+
+  // 2. Switch Galaxy Theme (smooth 800ms transition)
+  const targetThemeKey = isIN ? 'IN_BHARAT' : 'US_WALLSTREET';
+  const theme = setGalaxyTheme(targetThemeKey, 800);
+
+  // 3. Update Stream Colors if streams exist
+  if (cashFlowStream?.setStreamColors && theme?.streams?.inflow) {
+    cashFlowStream.setStreamColors(theme.streams.inflow);
+  }
+  if (expenseStream?.setStreamColors && theme?.streams?.outflow) {
+    expenseStream.setStreamColors(theme.streams.outflow);
   }
 
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  // 4. Update Desktop Header Market Switcher Pill buttons
+  const btnUs = document.getElementById('btn-market-us');
+  const btnIn = document.getElementById('btn-market-in');
+  if (btnUs) btnUs.classList.toggle('active', !isIN);
+  if (btnIn) btnIn.classList.toggle('active', isIN);
 
-  const material = new THREE.PointsMaterial({
-    size: 0.13,
-    color: 0x94a3b8,
-    transparent: true,
-    opacity: 0.55
-  });
+  // 5. Update Preset dropdown if present
+  const presetSelect = document.getElementById('preset-select');
+  if (presetSelect) {
+    presetSelect.value = isIN ? 'india-bluechip' : 'institutional';
+  }
 
-  const stars = new THREE.Points(geometry, material);
-  scene.add(stars);
+  // 6. Update WebXR Wrist HUD
+  if (xrManager?.updateMarketStatus) {
+    xrManager.updateMarketStatus(isIN ? 'IN' : 'US');
+  }
+
+  // 7. Play Sound FX
+  soundFx.playEnergySurgeSound();
 }
 
 /**
@@ -394,18 +514,26 @@ function onPortfolioChanged() {
   // 1. Re-render photorealistic asset nodes
   renderAssetNodes(portfolioState.assets, currentCategory);
 
-  // 2. Re-create orbit paths
+  // 2. Re-create orbit paths matching active galaxy theme
   if (orbitPathsGroup) {
-    scene.remove(orbitPathsGroup);
+    if (solarSystemGroup) {
+      solarSystemGroup.remove(orbitPathsGroup);
+    } else {
+      scene.remove(orbitPathsGroup);
+    }
     orbitPathsGroup.traverse((c) => {
       if (c.geometry) c.geometry.dispose();
       if (c.material) c.material.dispose();
     });
   }
-  orbitPathsGroup = createOrbitPaths(portfolioState.assets, currentCategory);
-  scene.add(orbitPathsGroup);
+  orbitPathsGroup = createOrbitPaths(portfolioState.assets, currentCategory, getCurrentGalaxyTheme());
+  if (solarSystemGroup) {
+    solarSystemGroup.add(orbitPathsGroup);
+  } else {
+    scene.add(orbitPathsGroup);
+  }
 
-  // 3. Update Central Star Header
+  // 3. Update Central Star Header with formatted Net Worth
   if (centralSun?.userData?.labelNetWorth) {
     centralSun.userData.labelNetWorth.text = `${portfolioState.summary.formattedNetWorth}\nTOTAL NET WORTH`;
     centralSun.userData.labelNetWorth.sync();
@@ -415,24 +543,159 @@ function onPortfolioChanged() {
   const netWorthElem = document.getElementById('hud-net-worth');
   if (netWorthElem) netWorthElem.textContent = portfolioState.summary.formattedNetWorth;
 
+  const isINR = (portfolioState.summary.currency || '').toUpperCase() === 'INR';
   const inflowElem = document.getElementById('hud-inflow');
-  if (inflowElem) inflowElem.textContent = portfolioState.summary.monthlyInflow || '+$6,420';
+  if (inflowElem) inflowElem.textContent = portfolioState.summary.monthlyInflow || (isINR ? '+₹5,35,000' : '+$6,420');
 
   const outflowElem = document.getElementById('hud-outflow');
-  if (outflowElem) outflowElem.textContent = portfolioState.summary.monthlyOutflow || '-$3,850';
+  if (outflowElem) outflowElem.textContent = portfolioState.summary.monthlyOutflow || (isINR ? '-₹3,20,000' : '-$3,850');
 
   const netSavingsElem = document.getElementById('hud-net-savings');
-  if (netSavingsElem) netSavingsElem.textContent = portfolioState.summary.netMonthlySavings || '+$2,570 / mo';
+  if (netSavingsElem) netSavingsElem.textContent = portfolioState.summary.netMonthlySavings || (isINR ? '+₹2,15,000 / mo' : '+$2,570 / mo');
 
-  // 5. Update WebXR Wrist Holographic Palette Net Worth & Spatial Data Slate
+  // 5. Update WebXR Wrist Holographic Palette Net Worth, Market Status & Spatial Data Slate
   if (xrManager?.updateNetWorthText) {
     xrManager.updateNetWorthText(portfolioState.summary.formattedNetWorth);
+  }
+  if (xrManager?.updateMarketStatus) {
+    xrManager.updateMarketStatus(currentMarket);
   }
   if (xrManager?.updateSpatialDataPanel) {
     xrManager.updateSpatialDataPanel(portfolioState);
   }
 
   renderModalAssetList();
+}
+
+/**
+ * Switches between Dedicated Visual Modes:
+ * - 'VR' (Deep Space VR Mode: Immersive space skybox, starfield, 1.0 full room scale at origin)
+ * - 'MR' (Mixed Reality Tabletop Mode: Transparent WebGL background, 0.2 miniature scale at desk height)
+ * @param {'VR'|'MR'|boolean} targetMode
+ */
+export function handleSetMode(targetMode) {
+  const isMR = (targetMode === 'MR' || targetMode === 'TABLETOP' || targetMode === true);
+  if (typeof window !== 'undefined') {
+    window.hasAnchoredToTable = false;
+  }
+  isPassthroughMode = isMR;
+  setPassthroughMode(isPassthroughMode);
+
+  if (isPassthroughMode) {
+    renderer.setClearColor(0x000000, 0);
+    renderer.setClearAlpha(0);
+    const session = renderer?.xr?.getSession ? renderer.xr.getSession() : null;
+    if (session && typeof session.requestEnvironmentBlendMode === 'function') {
+      session.requestEnvironmentBlendMode('alpha-blend').catch(() => {});
+    }
+  } else {
+    renderer.setClearColor(0x030712, 1);
+    renderer.setClearAlpha(1);
+    const session = renderer?.xr?.getSession ? renderer.xr.getSession() : null;
+    if (session && typeof session.requestEnvironmentBlendMode === 'function') {
+      session.requestEnvironmentBlendMode('opaque').catch(() => {});
+    }
+  }
+
+  // Update XR HUD & Wrist Dock
+  if (xrManager?.updateModeStatus) {
+    xrManager.updateModeStatus(isMR ? 'MR' : 'VR');
+  }
+
+  // Update Desktop Header Pill Buttons
+  const btnVR = document.getElementById('btn-mode-vr');
+  const btnMR = document.getElementById('btn-mode-mr');
+  if (btnVR) btnVR.classList.toggle('active', !isMR);
+  if (btnMR) btnMR.classList.toggle('active', isMR);
+
+  const targetPivot = tabletopPivot || solarSystemGroup;
+  if (!targetPivot) return;
+
+  if (activeTabletopTween) {
+    activeTabletopTween.stop();
+  }
+  TWEEN.removeAll();
+
+  const isVR = Boolean(renderer?.xr?.isPresenting);
+  const activeCamera = (isVR && renderer?.xr?.getCamera) ? renderer.xr.getCamera() : camera;
+  const currentPos = targetPivot.position;
+  const currentScale = targetPivot.scale.x;
+
+  if (solarSystemGroup && solarSystemGroup.parent === tabletopPivot) {
+    solarSystemGroup.scale.set(1.0, 1.0, 1.0);
+    solarSystemGroup.position.set(0, 0, 0);
+  }
+
+  if (isPassthroughMode) {
+    // Miniature Tabletop scale (0.18)
+    const targetScale = 0.18;
+    let targetX = 0;
+    let targetY = -0.15;
+    let targetZ = 0;
+
+    if (isVR) {
+      const headPos = activeCamera.getWorldPosition(new THREE.Vector3());
+      const headDir = new THREE.Vector3();
+      activeCamera.getWorldDirection(headDir);
+      headDir.y = 0;
+      if (headDir.lengthSq() < 0.001) headDir.set(0, 0, -1);
+      headDir.normalize();
+
+      // Position 0.85m directly in front of the user at comfortable desk height (camera.y - 0.35)
+      targetX = headPos.x + headDir.x * 0.85;
+      targetZ = headPos.z + headDir.z * 0.85;
+      targetY = headPos.y - 0.35;
+    }
+
+    activeTabletopTween = new TWEEN.Tween({
+      x: currentPos.x,
+      y: currentPos.y,
+      z: currentPos.z,
+      s: currentScale
+    })
+      .to({
+        x: targetX,
+        y: targetY,
+        z: targetZ,
+        s: targetScale
+      }, 600)
+      .easing(TWEEN.Easing.Cubic.Out)
+      .onUpdate((obj) => {
+        targetPivot.position.set(obj.x, obj.y, obj.z);
+        targetPivot.scale.set(obj.s, obj.s, obj.s);
+      });
+
+    TWEEN.add(activeTabletopTween);
+    activeTabletopTween.start();
+  } else {
+    // Restore full room-scale (1.0) and origin (0, 0, 0)
+    activeTabletopTween = new TWEEN.Tween({
+      x: currentPos.x,
+      y: currentPos.y,
+      z: currentPos.z,
+      s: currentScale
+    })
+      .to({
+        x: 0,
+        y: 0,
+        z: 0,
+        s: 1.0
+      }, 600)
+      .easing(TWEEN.Easing.Cubic.Out)
+      .onUpdate((obj) => {
+        targetPivot.position.set(obj.x, obj.y, obj.z);
+        targetPivot.scale.set(obj.s, obj.s, obj.s);
+      });
+
+    TWEEN.add(activeTabletopTween);
+    activeTabletopTween.start();
+  }
+
+  soundFx.playEnergySurgeSound();
+}
+
+export function handleTogglePassthrough(isActive) {
+  handleSetMode(isActive ? 'MR' : 'VR');
 }
 
 /* ==========================================================================
@@ -442,16 +705,30 @@ export function selectPlanet(planetMesh) {
   if (!planetMesh) return;
   selectedPlanetMesh = planetMesh;
 
-  // Isolate active planet: hide background floating Troika labels
-  setLabelsOcclusionState(planetMesh);
+  // In multi-window mode, keep all planet labels visible so other assets remain identifiable
+  setLabelsOcclusionState(null);
 
   // Auto-pause planetary orbit during chart inspection
   pauseOrbitForChart();
 
   // Summon High-Tech Holographic Financial HUD directly into user viewport
   const isVR = Boolean(renderer?.xr?.isPresenting);
+  const isPassthrough = Boolean(xrManager?.isPassthroughActive || isPassthroughMode);
   const activeCamera = (isVR && renderer?.xr?.getCamera) ? renderer.xr.getCamera() : camera;
-  show3DSplineChart(planetMesh, scene, { camera: activeCamera, isVR, renderer });
+  const ticker = planetMesh.userData?.ticker || planetMesh.userData?.symbol;
+  if (ticker) {
+    const assetData = planetMesh.userData?.assetData || {
+      name: planetMesh.userData?.name || ticker,
+      price: planetMesh.userData?.price || '$1,200',
+      change: planetMesh.userData?.change || '+2.5%',
+      returns: planetMesh.userData?.returns || 0,
+      color: planetMesh.userData?.color || '#00f0ff',
+      currency: planetMesh.userData?.currency || 'USD'
+    };
+    openOrFocusChart(ticker, assetData, activeCamera, scene);
+  } else {
+    show3DSplineChart(planetMesh, scene, { camera: activeCamera, isVR, isPassthrough, renderer });
+  }
 
   // Update HUD Card
   updateHUDCard(planetMesh.userData);
@@ -468,8 +745,10 @@ export function handleExitVR() {
   if (hudContainer) {
     hudContainer.style.opacity = '1';
     hudContainer.style.pointerEvents = 'auto';
+    hudContainer.style.display = '';
   }
   document.body.classList.remove('vr-mode');
+  document.body.classList.remove('in-xr');
 
   // Reset camera controls back to standard OrbitControls overview
   resetCameraView();
@@ -483,17 +762,19 @@ export function resetCameraView() {
     xrManager.resetRigPosition();
   }
 
-  const twPos = new TWEEN.Tween(camera.position)
-    .to({ x: 0, y: 16, z: 26 }, 950)
-    .easing(TWEEN.Easing.Cubic.Out);
-  TWEEN.add(twPos);
-  twPos.start();
+  if (!renderer?.xr?.isPresenting) {
+    const twPos = new TWEEN.Tween(camera.position)
+      .to({ x: 0, y: 16, z: 26 }, 950)
+      .easing(TWEEN.Easing.Cubic.Out);
+    TWEEN.add(twPos);
+    twPos.start();
 
-  const twTgt = new TWEEN.Tween(controls.target)
-    .to({ x: 0, y: 0, z: 0 }, 950)
-    .easing(TWEEN.Easing.Cubic.Out);
-  TWEEN.add(twTgt);
-  twTgt.start();
+    const twTgt = new TWEEN.Tween(controls.target)
+      .to({ x: 0, y: 0, z: 0 }, 950)
+      .easing(TWEEN.Easing.Cubic.Out);
+    TWEEN.add(twTgt);
+    twTgt.start();
+  }
 
   handleCloseChart();
 }
@@ -562,19 +843,20 @@ export async function selectStockSymbol(symbol, stockMetadata = null) {
 
   if (targetPlanet) {
     selectedPlanetMesh = targetPlanet;
-    setLabelsOcclusionState(targetPlanet);
   } else {
     selectedPlanetMesh = null;
-    setLabelsOcclusionState(null);
   }
+  setLabelsOcclusionState(null);
 
   // Auto-pause planetary orbit during chart inspection
   pauseOrbitForChart();
 
   // Summon 3D Chart directly to user's viewport without camera fly-to
   const isVR = Boolean(renderer?.xr?.isPresenting);
+  const isPassthrough = Boolean(xrManager?.isPassthroughActive || isPassthroughMode);
   const activeCamera = (isVR && renderer?.xr?.getCamera) ? renderer.xr.getCamera() : camera;
-  show3DSplineChart(targetPlanet || stockData, scene, { camera: activeCamera, isVR, renderer });
+  const assetData = (targetPlanet && targetPlanet.userData) ? targetPlanet.userData : stockData;
+  openOrFocusChart(sym, assetData, activeCamera, scene);
 
   // Update 2D Inspector Card immediately
   updateHUDCardWithLiveData({
@@ -718,6 +1000,7 @@ function toggleAudioEngine() {
 function applyCategoryFilter(category) {
   currentCategory = category || 'ALL';
 
+  // 1. Update UI chips in desktop HUD
   const filterChips = document.querySelectorAll('.category-chip');
   filterChips.forEach((chip) => {
     const chipCat = chip.getAttribute('data-category');
@@ -728,26 +1011,88 @@ function applyCategoryFilter(category) {
     }
   });
 
-  renderAssetNodes(portfolioState.assets, currentCategory);
+  // 2. Smoothly shift skybox nebula tint & orbit colors to sector theme
+  const theme = setSectorThemeSync(currentCategory, currentMarket);
 
+  // 3. Update stream colors if theme provides them
+  if (cashFlowStream?.setStreamColors && theme?.streams?.inflow) {
+    cashFlowStream.setStreamColors(theme.streams.inflow);
+  }
+  if (expenseStream?.setStreamColors && theme?.streams?.outflow) {
+    expenseStream.setStreamColors(theme.streams.outflow);
+  }
+
+  // 4. Highlight matching planets while dimming out-of-sector assets to subtle ghost silhouettes (opacity: 0.18)
+  applySectorGhosting(currentCategory, 450);
+
+  // 5. Re-create orbit paths with active theme styling
   if (orbitPathsGroup) {
-    scene.remove(orbitPathsGroup);
+    if (solarSystemGroup) {
+      solarSystemGroup.remove(orbitPathsGroup);
+    } else {
+      scene.remove(orbitPathsGroup);
+    }
     orbitPathsGroup.traverse((c) => {
       if (c.geometry) c.geometry.dispose();
       if (c.material) c.material.dispose();
     });
   }
-  orbitPathsGroup = createOrbitPaths(portfolioState.assets, currentCategory);
-  scene.add(orbitPathsGroup);
+  orbitPathsGroup = createOrbitPaths(portfolioState.assets, currentCategory, getCurrentGalaxyTheme());
+  if (solarSystemGroup) {
+    solarSystemGroup.add(orbitPathsGroup);
+  } else {
+    scene.add(orbitPathsGroup);
+  }
 
+  // 6. Update WebXR wrist dock active category
   if (xrManager?.updateActiveCategory) {
     xrManager.updateActiveCategory(currentCategory);
   }
 }
 
+
 /* ==========================================================================
    Desktop Mouse & Pointer Raycasting
    ========================================================================== */
+let desktopDraggedChart = null;
+const desktopDragPlane = new THREE.Plane();
+const desktopDragOffset = new THREE.Vector3();
+const desktopIntersectPoint = new THREE.Vector3();
+
+function onPointerDown(event) {
+  if (renderer.xr.isPresenting) return;
+  if (event.target.closest('.interactive')) return;
+
+  mousePointer.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mousePointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
+  mouseRaycaster.setFromCamera(mousePointer, camera);
+
+  for (const win of activeChartWindows) {
+    const hits = mouseRaycaster.intersectObject(win, true);
+    for (const hit of hits) {
+      if (hit.object.userData?.isTitleBar) {
+        desktopDraggedChart = win;
+        const camDir = camera.getWorldDirection(new THREE.Vector3()).negate();
+        desktopDragPlane.setFromNormalAndCoplanarPoint(camDir, hit.point);
+        desktopDragOffset.copy(win.position).sub(hit.point);
+        if (controls) controls.enabled = false;
+        document.body.style.cursor = 'grabbing';
+        soundFx.playEnergySurgeSound();
+        return;
+      }
+    }
+  }
+}
+
+function onPointerUp(event) {
+  if (desktopDraggedChart) {
+    desktopDraggedChart = null;
+    if (controls) controls.enabled = true;
+    document.body.style.cursor = 'default';
+    soundFx.playHoverSound();
+  }
+}
+
 function onPointerMove(event) {
   mousePointer.x = (event.clientX / window.innerWidth) * 2 - 1;
   mousePointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
@@ -756,26 +1101,68 @@ function onPointerMove(event) {
 
   mouseRaycaster.setFromCamera(mousePointer, camera);
 
-  // 1. Check 3D Candlestick Hover & Floating Micro-HUD Tooltip
-  const currentChart = getCurrentChart();
-  let candleHit = null;
-  if (currentChart) {
-    const chartHits = mouseRaycaster.intersectObject(currentChart, true);
-    for (const hit of chartHits) {
-      if (hit.object.userData?.isCandle) {
-        candleHit = hit.object;
-        break;
+  // If dragging chart window on desktop
+  if (desktopDraggedChart) {
+    if (mouseRaycaster.ray.intersectPlane(desktopDragPlane, desktopIntersectPoint)) {
+      desktopDraggedChart.position.copy(desktopIntersectPoint).add(desktopDragOffset);
+    }
+    return;
+  }
+
+  // 1. Check 3D Candlestick Hover & Scrubber across all open chart windows
+  let isOverChart = false;
+  const currentDisplayMode = getChartDisplayMode();
+  if (currentDisplayMode === 'candles' || currentDisplayMode === 'candlestick') {
+    // A. Direct Candle Collider raycasting
+    const allCandleColliders = [];
+    activeChartWindows.forEach((win) => {
+      if (win.userData?.candleColliders && win.userData.candleGroup?.visible !== false) {
+        allCandleColliders.push(...win.userData.candleColliders);
+      }
+    });
+
+    if (allCandleColliders.length > 0) {
+      const candleHits = mouseRaycaster.intersectObjects(allCandleColliders, false);
+      if (candleHits.length > 0) {
+        const hitCandle = candleHits[0].object;
+        if (hitCandle.userData?.isCandle) {
+          updateCandleHover(hitCandle);
+          isOverChart = true;
+          hoveredWin = hitCandle.userData.parentChart || hitCandle.userData.parentWindow;
+          document.body.style.cursor = 'pointer';
+        }
+      }
+    }
+
+    // B. Check scrubber & window interactive surface fallback
+    if (!isOverChart) {
+      for (const win of activeChartWindows) {
+        const chartHits = mouseRaycaster.intersectObject(win, true);
+        if (chartHits.length > 0) {
+          const firstHit = chartHits[0];
+          if (firstHit.point && !firstHit.object.userData?.isTitleBar && !firstHit.object.userData?.isCloseButton && !firstHit.object.userData?.isCloseHitbox) {
+            updateCandleScrubber(firstHit.point, win, () => soundFx.playHoverSound());
+            isOverChart = true;
+            hoveredWin = win;
+            document.body.style.cursor = 'pointer';
+            break;
+          } else if (firstHit.object.userData?.isTitleBar) {
+            document.body.style.cursor = 'grab';
+            isOverChart = true;
+            break;
+          }
+        }
       }
     }
   }
 
-  if (candleHit !== hoveredCandleMesh) {
-    if (hoveredCandleMesh) setCandleHoverState(hoveredCandleMesh, false);
-    hoveredCandleMesh = candleHit;
-    if (hoveredCandleMesh) {
-      setCandleHoverState(hoveredCandleMesh, true);
-      document.body.style.cursor = 'pointer';
-    }
+  if (!isOverChart) {
+    clearCandleHover();
+    activeChartWindows.forEach((win) => clearCandleScrubber(win));
+  } else if (hoveredWin) {
+    activeChartWindows.forEach((win) => {
+      if (win !== hoveredWin) clearCandleScrubber(win);
+    });
   }
 
   // 2. Check Planetary Node Hover
@@ -797,7 +1184,7 @@ function onPointerMove(event) {
     if (hoveredMesh) {
       setNodeHoverState(hoveredMesh, false);
       hoveredMesh = null;
-      if (!hoveredCandleMesh) document.body.style.cursor = 'default';
+      if (!hoveredCandleMesh && !isOverChart) document.body.style.cursor = 'default';
     }
   }
 }
@@ -808,36 +1195,83 @@ function onPointerClick(event) {
 
   mouseRaycaster.setFromCamera(mousePointer, camera);
 
-  // Check 3D Chart close button, 3D mode toggles & resolution preset buttons
-  const currentChart = getCurrentChart();
-  if (currentChart) {
-    const chartHits = mouseRaycaster.intersectObject(currentChart, true);
+  // 0. Priority direct check against active close hitboxes & buttons
+  const allCloseTargets = [
+    ...closeHitboxRegistry,
+    ...(typeof window !== 'undefined' && Array.isArray(window.activeCloseHitboxes) ? window.activeCloseHitboxes : []),
+    ...(typeof window !== 'undefined' && Array.isArray(window.activeCloseButtons) ? window.activeCloseButtons : [])
+  ].filter((b) => b && b.parent);
+
+  if (allCloseTargets.length > 0) {
+    const closeHits = mouseRaycaster.intersectObjects(allCloseTargets, true);
+    if (closeHits.length > 0) {
+      const hitObj = closeHits[0].object;
+      const parentWin = hitObj.userData?.parentWindow || hitObj.userData?.parentChart || hitObj.parent;
+      if (parentWin) {
+        closeChartWindow(parentWin, scene);
+        return;
+      }
+    }
+  }
+
+  // 0b. Priority direct check against active Wolf Egg Hitboxes & gold badges
+  const allEggTargets = (typeof window !== 'undefined' && Array.isArray(window.activeEggHitboxes) ? window.activeEggHitboxes : []).filter((b) => b && b.parent);
+  if (allEggTargets.length > 0) {
+    const eggHits = mouseRaycaster.intersectObjects(allEggTargets, true);
+    if (eggHits.length > 0) {
+      const hitObj = eggHits[0].object;
+      const parentWin = hitObj.userData?.parentChart || hitObj.userData?.parentWindow || hitObj.parent;
+      if (parentWin) {
+        console.log('[Desktop] Wolf Egg Gold [$] Badge Clicked!');
+        triggerWolfEasterEgg(parentWin);
+        return;
+      }
+    }
+  }
+
+  // Check all active chart windows: close button, mode toggles, resolution presets, title bar, wolf egg
+  for (const win of activeChartWindows) {
+    const chartHits = mouseRaycaster.intersectObject(win, true);
     if (chartHits.length > 0) {
       for (const hit of chartHits) {
-        if (hit.object.userData?.isCloseButton) {
-          handleCloseChart();
+        if (hit.object.userData?.isWolfEgg) {
+          triggerWolfEasterEgg(win);
+          return;
+        }
+        if (hit.object.userData?.isCloseButton || hit.object.userData?.isCloseHitbox) {
+          closeChartWindow(win, scene);
           return;
         }
         if (hit.object.userData?.isChartModeToggle) {
-          setChartDisplayMode(hit.object.userData.targetMode);
+          setChartDisplayMode(hit.object.userData.targetMode, win);
           return;
         }
         if (hit.object.userData?.isResolutionPreset) {
-          setChartResolutionPreset(hit.object.userData.presetId, scene);
+          setChartResolutionPreset(hit.object.userData.presetId, scene, win);
+          return;
+        }
+        if (hit.object.userData?.isTimeframePill || hit.object.userData?.onClick) {
+          if (typeof hit.object.userData.onClick === 'function') {
+            hit.object.userData.onClick();
+            return;
+          }
+        }
+        if (hit.object.userData?.isTitleBar) {
+          handleTitleBarClick(win);
           return;
         }
       }
     }
   }
 
-  // Check planets in planetsGroup
+  // Check planets in planetsGroup (bubble up hierarchy to find ticker or asset node)
   const intersects = mouseRaycaster.intersectObjects(planetsGroup.children, true);
   if (intersects.length > 0) {
     let hit = intersects[0].object;
-    while (hit && (!hit.userData || !hit.userData.isAssetNode)) {
+    while (hit && !hit.userData?.ticker && !hit.userData?.symbol && !hit.userData?.isAssetNode && hit.parent && hit.parent !== scene) {
       hit = hit.parent;
     }
-    if (hit && hit.userData?.isAssetNode) {
+    if (hit && (hit.userData?.isAssetNode || hit.userData?.ticker || hit.userData?.symbol)) {
       selectPlanet(hit);
     }
   }
@@ -887,8 +1321,24 @@ function renderModalAssetList() {
 
 function setupEventListeners() {
   window.addEventListener('resize', onWindowResize);
+  window.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('pointerup', onPointerUp);
   window.addEventListener('pointermove', onPointerMove);
   window.addEventListener('click', onPointerClick);
+
+  // Country Market Switcher Buttons (US Wall St vs IN Bharat)
+  const btnMarketUS = document.getElementById('btn-market-us');
+  const btnMarketIN = document.getElementById('btn-market-in');
+  if (btnMarketUS) {
+    btnMarketUS.addEventListener('click', () => {
+      handleSwitchMarket('US');
+    });
+  }
+  if (btnMarketIN) {
+    btnMarketIN.addEventListener('click', () => {
+      handleSwitchMarket('IN');
+    });
+  }
 
   // Auto Orbit Toggle
   const btnAutoOrbit = document.getElementById('btn-auto-orbit');
@@ -935,8 +1385,8 @@ function setupEventListeners() {
   }
   if (btnChartCandle) {
     btnChartCandle.addEventListener('click', () => {
-      setChartDisplayMode('candlestick');
-      if (xrManager?.updateChartMode) xrManager.updateChartMode('candlestick');
+      setChartDisplayMode('candles');
+      if (xrManager?.updateChartMode) xrManager.updateChartMode('candles');
     });
   }
 
@@ -1149,6 +1599,33 @@ function setupEventListeners() {
       }
     });
   }
+
+  // Desktop Dedicated Visual Mode Buttons
+  const btnModeVR = document.getElementById('btn-mode-vr');
+  if (btnModeVR) {
+    btnModeVR.addEventListener('click', () => {
+      handleSetMode('VR');
+    });
+  }
+
+  const btnModeMR = document.getElementById('btn-mode-mr');
+  if (btnModeMR) {
+    btnModeMR.addEventListener('click', () => {
+      handleSetMode('MR');
+    });
+  }
+
+  // Keyboard shortcuts: 'V' for Deep Space VR, 'M' / 'P' for MR Tabletop
+  window.addEventListener('keydown', (e) => {
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT')) {
+      return;
+    }
+    if (e.code === 'KeyV' || e.key === 'v' || e.key === 'V') {
+      handleSetMode('VR');
+    } else if (e.code === 'KeyM' || e.key === 'm' || e.key === 'M' || e.code === 'KeyP' || e.key === 'p' || e.key === 'P') {
+      handleSetMode('MR');
+    }
+  });
 }
 
 function onWindowResize() {
@@ -1182,20 +1659,26 @@ function renderLoop(timestamp, frame) {
     nebulaDome.material.uniforms.uTime.value = elapsedTime;
   }
 
-  // 4. Animate Volumetric Dust Cloud Floor
-  if (dustCloudParticles && dustPositions) {
-    const total = dustOriginalY.length;
-    for (let i = 0; i < total; i++) {
-      const x = dustPositions[i * 3];
-      const z = dustPositions[i * 3 + 2];
-      const wave = Math.sin(x * 0.16 + elapsedTime * 1.4) * Math.cos(z * 0.16 + elapsedTime * 1.4) * 0.48;
-      dustPositions[i * 3 + 1] = dustOriginalY[i] + wave;
+  // 4. Animate Volumetric Dust Cloud Floor (Zero CPU wave overhead in VR)
+  if (dustCloudParticles) {
+    dustCloudParticles.rotation.y += delta * 0.012;
+    if (!renderer.xr.isPresenting && dustPositions) {
+      const total = dustOriginalY.length;
+      for (let i = 0; i < total; i++) {
+        const x = dustPositions[i * 3];
+        const z = dustPositions[i * 3 + 2];
+        const wave = Math.sin(x * 0.16 + elapsedTime * 1.4) * Math.cos(z * 0.16 + elapsedTime * 1.4) * 0.48;
+        dustPositions[i * 3 + 1] = dustOriginalY[i] + wave;
+      }
+      dustCloudParticles.geometry.attributes.position.needsUpdate = true;
     }
-    dustCloudParticles.geometry.attributes.position.needsUpdate = true;
   }
 
   // 5. Animate Celestial Bodies (Solar Core Granulation, Corona Flare, Planetary Rotation, Rings & Asteroid Belts)
   updateCelestialAnimations(delta, elapsedTime, isAutoOrbiting, centralSun);
+
+  // 5b. Animate Dynamic Galaxy Environment (Cosmic Starfield & Pulsar Flashes)
+  updateGalaxyEnvironment(delta, elapsedTime);
 
   // 6. Animate Cash-Flow Accretion & Expense Outflow Streams
   if (cashFlowStream) {
@@ -1212,19 +1695,31 @@ function renderLoop(timestamp, frame) {
 
   // 7. Update WebXR Hand-Tracking, Controllers & Wrist Dock
   if (xrManager) {
-    const interactiveObjects = [];
-    planetsGroup.traverse((child) => {
-      if (child.userData?.isAssetNode) interactiveObjects.push(child);
-    });
-    const chart = getCurrentChart();
-    if (chart) {
-      chart.traverse((child) => {
-        if (child.userData?.isCloseButton || child.userData?.isChartModeToggle || child.userData?.isCandle || child.userData?.isResolutionPreset || child.userData?.isVRButton || child.userData?.onClick || child.userData?.isInteractive) {
-          interactiveObjects.push(child);
+    if (!cachedPlanetInteractive && planetsGroup) {
+      cachedPlanetInteractive = [];
+      planetsGroup.traverse((child) => {
+        if (child.userData?.isAssetNode && (child.isMesh || child.userData?.primaryMesh)) {
+          cachedPlanetInteractive.push(child);
         }
       });
     }
-    xrManager.update(interactiveObjects, delta);
+
+    const interactiveObjects = [
+      ...(cachedPlanetInteractive || [])
+    ];
+    activeChartWindows.forEach((win) => {
+      if (win.userData?.titleBar) interactiveObjects.push(win.userData.titleBar);
+      if (win.userData?.closeBtn) interactiveObjects.push(win.userData.closeBtn);
+      if (win.userData?.closeHitbox) interactiveObjects.push(win.userData.closeHitbox);
+      if (win.userData?.glassPanel) interactiveObjects.push(win.userData.glassPanel);
+      if (win.userData?.registeredButtons) {
+        win.userData.registeredButtons.forEach((b) => interactiveObjects.push(b));
+      }
+      if (win.userData?.candleColliders) {
+        win.userData.candleColliders.forEach((c) => interactiveObjects.push(c));
+      }
+    });
+    xrManager.update(interactiveObjects, delta, frame);
   }
 
   // 8. Render Frame (Bloom vs WebXR stereo direct)

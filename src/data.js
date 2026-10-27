@@ -308,11 +308,15 @@ function notifySubscribers() {
   });
 }
 
+export let currentMarket = 'US'; // 'US' | 'IN'
+
 export let portfolioState = {
   currentPreset: 'institutional',
+  currentMarket: 'US',
   assets: [],
   summary: {
     totalNetWorth: 1245000,
+    currency: 'USD',
     formattedNetWorth: '$1,245,000',
     totalReturns: 43.2,
     formattedReturns: '+43.2% 1Y',
@@ -324,6 +328,7 @@ export let portfolioState = {
     annualYield: '3.85%'
   }
 };
+
 
 /**
  * Procedurally generates realistic 12-month historical price trajectories.
@@ -430,9 +435,24 @@ export function recalculatePortfolio() {
 export function loadPresetProfile(presetKey) {
   const preset = PRESET_PROFILES[presetKey] || PRESET_PROFILES['institutional'];
   portfolioState.currentPreset = presetKey;
+  portfolioState.currentMarket = preset.currency === 'INR' ? 'IN' : 'US';
+  currentMarket = portfolioState.currentMarket;
   portfolioState.assets = JSON.parse(JSON.stringify(preset.assets));
   return recalculatePortfolio();
 }
+
+/**
+ * Switches between India (NSE/BSE) and US (NYSE/NASDAQ) markets.
+ * @param {'IN'|'US'} marketKey
+ */
+export function switchMarket(marketKey) {
+  const m = (marketKey || 'US').toUpperCase();
+  currentMarket = (m === 'IN' || m === 'BHARAT') ? 'IN' : 'US';
+  portfolioState.currentMarket = currentMarket;
+  const targetPreset = currentMarket === 'IN' ? 'india-bluechip' : 'institutional';
+  return loadPresetProfile(targetPreset);
+}
+
 
 export function addAsset(assetData) {
   const id = `asset-${Date.now()}`;

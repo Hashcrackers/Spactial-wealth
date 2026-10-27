@@ -95,41 +95,262 @@ export function createCentralSun(summaryData = {}) {
 }
 
 /**
- * Creates concentric planetary orbit track rings with comfortable spread (5.0 + index * 2.8).
+ * Creates concentric planetary orbit track rings matching the active galaxy theme:
+ * - 'US_WALLSTREET': Crisp neon cyan (#06b6d4) technical grid rings
+ * - 'IN_BHARAT': Golden double-ring ellipses with micro-particle dust (#f59e0b / #10b981)
+ * - 'CRYPTO_NEBULA': Polygon wireframe webs connecting volatile crypto nodes (#ec4899 / #8b5cf6)
+ * - 'BONDS_STEADY': Warm amber starlight harmonic smooth rings (#fbbf24)
  */
-export function createOrbitPaths(items = [], activeCategory = 'ALL') {
+export function createOrbitPaths(items = [], activeCategory = 'ALL', themeKey = 'US_WALLSTREET') {
   const orbitsGroup = new THREE.Group();
   orbitsGroup.name = 'OrbitPathsGroup';
 
   const catUpper = (activeCategory || 'ALL').toUpperCase();
-  const filtered = catUpper === 'ALL'
-    ? items
-    : items.filter((i) => (i.category || '').toUpperCase() === catUpper);
+  const isAll = catUpper === 'ALL';
+  const isBharat = themeKey === 'IN_BHARAT';
+  const isCrypto = themeKey === 'CRYPTO_NEBULA';
+  const isBonds = themeKey === 'BONDS_STEADY';
 
-  filtered.forEach((item, index) => {
-    // Spread orbit radius: 5.0 + index * 2.8
+  items.forEach((item, index) => {
     const orbitR = 5.0 + (index * 2.8);
-    const segments = 128;
-    const points = [];
+    const matchesCategory = isAll || (item.category || '').toUpperCase() === catUpper;
+    const baseOpacity = matchesCategory ? 0.38 : 0.08;
 
-    for (let i = 0; i <= segments; i++) {
-      const theta = (i / segments) * Math.PI * 2;
-      points.push(new THREE.Vector3(Math.cos(theta) * orbitR, 0, Math.sin(theta) * orbitR));
+    if (isBharat) {
+      // 1. IN_BHARAT: Golden Double-Ring Ellipses with Micro-Particle Dust
+      const segments = 120;
+      const pointsInner = [];
+      const pointsOuter = [];
+
+      for (let i = 0; i <= segments; i++) {
+        const theta = (i / segments) * Math.PI * 2;
+        // Subtle elliptical eccentric stretch (a = orbitR * 1.03, b = orbitR * 0.97)
+        const xIn = Math.cos(theta) * (orbitR * 0.98);
+        const zIn = Math.sin(theta) * (orbitR * 0.96);
+        pointsInner.push(new THREE.Vector3(xIn, 0, zIn));
+
+        const xOut = Math.cos(theta) * (orbitR * 1.02);
+        const zOut = Math.sin(theta) * (orbitR * 1.04);
+        pointsOuter.push(new THREE.Vector3(xOut, 0, zOut));
+      }
+
+      // Golden primary ellipse
+      const innerGeo = new THREE.BufferGeometry().setFromPoints(pointsInner);
+      const innerMat = new THREE.LineBasicMaterial({
+        color: new THREE.Color(0xf59e0b),
+        transparent: true,
+        opacity: baseOpacity,
+        blending: THREE.AdditiveBlending
+      });
+      orbitsGroup.add(new THREE.Line(innerGeo, innerMat));
+
+      // Vedic emerald outer ellipse
+      const outerGeo = new THREE.BufferGeometry().setFromPoints(pointsOuter);
+      const outerMat = new THREE.LineBasicMaterial({
+        color: new THREE.Color(0x10b981),
+        transparent: true,
+        opacity: baseOpacity * 0.85,
+        blending: THREE.AdditiveBlending
+      });
+      orbitsGroup.add(new THREE.Line(outerGeo, outerMat));
+
+      // Micro-particle dust along orbit
+      const dustCount = 28;
+      const dustGeo = new THREE.BufferGeometry();
+      const dustPos = new Float32Array(dustCount * 3);
+      for (let d = 0; d < dustCount; d++) {
+        const theta = (d / dustCount) * Math.PI * 2 + Math.random() * 0.1;
+        const r = orbitR + (Math.random() - 0.5) * 0.35;
+        dustPos[d * 3] = Math.cos(theta) * r;
+        dustPos[d * 3 + 1] = (Math.random() - 0.5) * 0.2;
+        dustPos[d * 3 + 2] = Math.sin(theta) * r;
+      }
+      dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+      const dustMat = new THREE.PointsMaterial({
+        size: 0.08,
+        color: 0xf59e0b,
+        transparent: true,
+        opacity: baseOpacity * 0.9,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+      });
+      orbitsGroup.add(new THREE.Points(dustGeo, dustMat));
+
+    } else if (isCrypto) {
+      // 2. CRYPTO_NEBULA: Polygon Wireframe Webs
+      const sides = 16; // Hexadecagonal faceted orbit
+      const polyPoints = [];
+      for (let i = 0; i <= sides; i++) {
+        const theta = (i / sides) * Math.PI * 2;
+        polyPoints.push(new THREE.Vector3(Math.cos(theta) * orbitR, 0, Math.sin(theta) * orbitR));
+      }
+
+      const polyGeo = new THREE.BufferGeometry().setFromPoints(polyPoints);
+      const polyMat = new THREE.LineBasicMaterial({
+        color: new THREE.Color(matchesCategory ? 0xec4899 : 0x8b5cf6),
+        transparent: true,
+        opacity: baseOpacity * 1.1,
+        blending: THREE.AdditiveBlending
+      });
+      orbitsGroup.add(new THREE.Line(polyGeo, polyMat));
+
+      // Cross-linking chord webs to create wireframe mesh feel
+      if (index > 0 && index % 2 === 1) {
+        const prevR = 5.0 + ((index - 1) * 2.8);
+        const webPoints = [];
+        for (let w = 0; w < 8; w++) {
+          const thetaA = (w / 8) * Math.PI * 2;
+          const thetaB = thetaA + 0.35;
+          webPoints.push(new THREE.Vector3(Math.cos(thetaA) * prevR, 0, Math.sin(thetaA) * prevR));
+          webPoints.push(new THREE.Vector3(Math.cos(thetaB) * orbitR, 0, Math.sin(thetaB) * orbitR));
+        }
+        const webGeo = new THREE.BufferGeometry().setFromPoints(webPoints);
+        const webMat = new THREE.LineSegments(webGeo, new THREE.LineBasicMaterial({
+          color: 0x8b5cf6,
+          transparent: true,
+          opacity: baseOpacity * 0.45,
+          blending: THREE.AdditiveBlending
+        }));
+        orbitsGroup.add(webMat);
+      }
+
+    } else if (isBonds) {
+      // 3. BONDS_STEADY: Warm Amber Harmonic Smooth Circles
+      const segments = 128;
+      const points = [];
+      for (let i = 0; i <= segments; i++) {
+        const theta = (i / segments) * Math.PI * 2;
+        points.push(new THREE.Vector3(Math.cos(theta) * orbitR, 0, Math.sin(theta) * orbitR));
+      }
+
+      const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+      const lineMat = new THREE.LineBasicMaterial({
+        color: new THREE.Color(0xfbbf24),
+        transparent: true,
+        opacity: baseOpacity * 0.9,
+        blending: THREE.AdditiveBlending
+      });
+      orbitsGroup.add(new THREE.Line(lineGeo, lineMat));
+
+    } else {
+      // 4. US_WALLSTREET: Crisp Neon Cyan Technical Grid Rings
+      const segments = 128;
+      const points = [];
+      for (let i = 0; i <= segments; i++) {
+        const theta = (i / segments) * Math.PI * 2;
+        points.push(new THREE.Vector3(Math.cos(theta) * orbitR, 0, Math.sin(theta) * orbitR));
+      }
+
+      const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+      const lineMat = new THREE.LineBasicMaterial({
+        color: new THREE.Color(matchesCategory ? 0x06b6d4 : 0x0284c7),
+        transparent: true,
+        opacity: baseOpacity,
+        blending: THREE.AdditiveBlending
+      });
+      orbitsGroup.add(new THREE.Line(lineGeo, lineMat));
+
+      // Technical Grid Radial Tic Marks
+      const ticPoints = [];
+      const ticCount = 32;
+      for (let t = 0; t < ticCount; t++) {
+        const theta = (t / ticCount) * Math.PI * 2;
+        const cos = Math.cos(theta);
+        const sin = Math.sin(theta);
+        ticPoints.push(new THREE.Vector3(cos * (orbitR - 0.12), 0, sin * (orbitR - 0.12)));
+        ticPoints.push(new THREE.Vector3(cos * (orbitR + 0.12), 0, sin * (orbitR + 0.12)));
+      }
+      const ticGeo = new THREE.BufferGeometry().setFromPoints(ticPoints);
+      const ticMat = new THREE.LineSegments(ticGeo, new THREE.LineBasicMaterial({
+        color: 0x06b6d4,
+        transparent: true,
+        opacity: baseOpacity * 0.65,
+        blending: THREE.AdditiveBlending
+      }));
+      orbitsGroup.add(ticMat);
     }
-
-    const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
-    const lineMat = new THREE.LineBasicMaterial({
-      color: new THREE.Color(item.color || 0x00f0ff),
-      transparent: true,
-      opacity: 0.22,
-      blending: THREE.AdditiveBlending
-    });
-    const orbitLine = new THREE.Line(lineGeo, lineMat);
-    orbitsGroup.add(orbitLine);
   });
 
   return orbitsGroup;
 }
+
+/**
+ * Highlights matching sector planets while dimming out-of-sector assets to subtle ghost silhouettes (opacity: 0.18).
+ * @param {string} activeCategory 'ALL' | 'Equities' | 'Index Funds' | 'Crypto & Web3' | 'Fixed Income' | 'Liquid Cash'
+ * @param {number} duration Transition duration in ms (default 450)
+ */
+export function applySectorGhosting(activeCategory = 'ALL', duration = 450) {
+  const catUpper = (activeCategory || 'ALL').toUpperCase();
+  const isAll = catUpper === 'ALL';
+
+  planetsGroup.children.forEach((anchor) => {
+    const asset = anchor.userData;
+    if (!asset) return;
+
+    const matches = isAll || (asset.category || '').toUpperCase() === catUpper;
+    const targetOpacity = matches ? 1.0 : 0.18;
+    const targetScale = matches ? 1.0 : 0.94;
+    const targetLabelOpacity = matches ? 1.0 : 0.15;
+    const targetEmissive = matches ? (asset.emissiveIntensity || 0.05) : 0.005;
+
+    // Smoothly scale anchor
+    if (duration > 0) {
+      const twScale = new TWEEN.Tween(anchor.scale)
+        .to({ x: targetScale, y: targetScale, z: targetScale }, duration)
+        .easing(TWEEN.Easing.Cubic.Out);
+      TWEEN.add(twScale);
+      twScale.start();
+    } else {
+      anchor.scale.set(targetScale, targetScale, targetScale);
+    }
+
+    // Traverse mesh materials in anchor
+    anchor.traverse((child) => {
+      if (child.isMesh && child.material) {
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        mats.forEach((mat) => {
+          mat.transparent = true;
+          if (duration > 0) {
+            const twMat = new TWEEN.Tween(mat)
+              .to({ opacity: targetOpacity }, duration)
+              .easing(TWEEN.Easing.Cubic.Out);
+            TWEEN.add(twMat);
+            twMat.start();
+
+            if (mat.emissiveIntensity !== undefined) {
+              const twEmiss = new TWEEN.Tween(mat)
+                .to({ emissiveIntensity: targetEmissive }, duration)
+                .easing(TWEEN.Easing.Cubic.Out);
+              TWEEN.add(twEmiss);
+              twEmiss.start();
+            }
+          } else {
+            mat.opacity = targetOpacity;
+            if (mat.emissiveIntensity !== undefined) {
+              mat.emissiveIntensity = targetEmissive;
+            }
+          }
+        });
+      }
+    });
+
+    // Dim floating Troika text label
+    const label = asset.textLabel;
+    if (label) {
+      if (duration > 0) {
+        const twLabel = new TWEEN.Tween(label)
+          .to({ fillOpacity: targetLabelOpacity, outlineOpacity: targetLabelOpacity * 0.8 }, duration)
+          .easing(TWEEN.Easing.Cubic.Out);
+        TWEEN.add(twLabel);
+        twLabel.start();
+      } else {
+        label.fillOpacity = targetLabelOpacity;
+        label.outlineOpacity = targetLabelOpacity * 0.8;
+      }
+    }
+  });
+}
+
 
 /**
  * Photorealistic Planet Factory: creates gas giants with rings, rocky worlds with polar caps, or asteroid swarms.
@@ -355,18 +576,15 @@ export function renderAssetNodes(items = [], activeCategory = 'ALL') {
     planetsGroup.remove(obj);
   }
 
-  const catUpper = (activeCategory || 'ALL').toUpperCase();
-  const filtered = catUpper === 'ALL'
-    ? items
-    : items.filter((i) => (i.category || '').toUpperCase() === catUpper);
-
-  const count = filtered.length;
+  const count = items.length;
   if (count === 0) return [];
 
-  filtered.forEach((item, index) => {
+  items.forEach((item, index) => {
     const { anchor } = createPhotorealisticPlanet(item, index, count);
     planetsGroup.add(anchor);
   });
+
+  applySectorGhosting(activeCategory, 0);
 
   return planetsGroup.children;
 }
@@ -409,6 +627,8 @@ export function setNodeHoverState(mesh, isHovered) {
 
 const _tempCamPos = new THREE.Vector3();
 const _tempCamQuat = new THREE.Quaternion();
+const _tempAnchorPos = new THREE.Vector3();
+const _tempParentQuat = new THREE.Quaternion();
 
 /**
  * Aligns Troika 3D text labels to camera orientation with distance scaling and depth fading.
@@ -422,38 +642,49 @@ export function billboardLabels(camera, centralSun) {
   planetsGroup.children.forEach((anchor) => {
     const label = anchor.userData?.textLabel;
     if (label) {
-      // Calculate distance for smooth depth scaling & fading
-      const dist = _tempCamPos.distanceTo(anchor.position);
+      anchor.getWorldPosition(_tempAnchorPos);
+      // Calculate distance in world space for smooth depth scaling & fading
+      const dist = _tempCamPos.distanceTo(_tempAnchorPos);
       const alpha = THREE.MathUtils.clamp(1.25 - (dist - 10) / 42, 0.25, 1.0);
       const scale = THREE.MathUtils.clamp(dist * 0.048, 0.75, 1.3);
 
       label.fillOpacity = alpha;
       label.outlineOpacity = alpha * 0.8;
       label.scale.set(scale, scale, scale);
-      label.quaternion.copy(_tempCamQuat);
+
+      // Ensure proper billboard orientation without mirrored text:
+      // textMesh world orientation must match camera.quaternion, compensating for parent rotation
+      if (label.parent) {
+        label.parent.getWorldQuaternion(_tempParentQuat);
+        label.quaternion.copy(_tempParentQuat.invert().multiply(_tempCamQuat));
+      } else {
+        label.quaternion.copy(_tempCamQuat);
+      }
     }
   });
 
   if (centralSun?.userData?.labelNetWorth) {
-    centralSun.userData.labelNetWorth.quaternion.copy(_tempCamQuat);
+    const labelNetWorth = centralSun.userData.labelNetWorth;
+    if (labelNetWorth.parent) {
+      labelNetWorth.parent.getWorldQuaternion(_tempParentQuat);
+      labelNetWorth.quaternion.copy(_tempParentQuat.invert().multiply(_tempCamQuat));
+    } else {
+      labelNetWorth.quaternion.copy(_tempCamQuat);
+    }
   }
 }
 
 /**
  * Controls visibility of all planetary floating text labels.
- * When a planet is selected, hides other background labels so they don't bleed through the chart plate.
- * When closed / reset view, restores visibility to all active labels.
+ * In multi-window pinboard mode, keeps all planetary labels visible
+ * so other planets remain identifiable and clickable while charts are open.
  * @param {THREE.Mesh|null} activePlanetMesh The currently inspected planet mesh, or null to restore all
  */
 export function setLabelsOcclusionState(activePlanetMesh = null) {
   planetsGroup.children.forEach((anchor) => {
     const label = anchor.userData?.textLabel;
     if (label) {
-      if (activePlanetMesh) {
-        label.visible = false;
-      } else {
-        label.visible = true;
-      }
+      label.visible = true;
     }
   });
 }
@@ -614,6 +845,17 @@ export function createCashFlowStream(scene) {
     material: streamMaterial,
     isEnabled: true,
     targetOpacity: 0.85,
+
+    /**
+     * Updates stream particle colors to match active theme/sector palette.
+     */
+    setStreamColors(colorArray) {
+      if (!colorArray || colorArray.length === 0) return;
+      for (let s = 0; s < streamColors.length; s++) {
+        const hex = colorArray[s % colorArray.length];
+        streamColors[s].set(hex);
+      }
+    },
 
     /**
      * Smoothly fades particle stream opacity in or out using Tween.js.
@@ -800,6 +1042,17 @@ export function createExpenseOutflowStream(scene) {
     material: jetMaterial,
     isEnabled: true,
     targetOpacity: 0.85,
+
+    /**
+     * Updates stream particle colors to match active theme/sector palette.
+     */
+    setStreamColors(colorArray) {
+      if (!colorArray || colorArray.length === 0) return;
+      for (let s = 0; s < streamColors.length; s++) {
+        const hex = colorArray[s % colorArray.length];
+        streamColors[s].set(hex);
+      }
+    },
 
     /**
      * Smoothly fades expense jet opacity in or out using Tween.js.

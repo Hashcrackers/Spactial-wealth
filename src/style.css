@@ -55,6 +55,15 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+body.passthrough-mode {
+  background-color: transparent !important;
+  background: transparent !important;
+}
+
+body.passthrough-mode #webgl-canvas {
+  background: transparent !important;
+}
+
 /* ==========================================================================
    Full-screen WebGL Canvas
    ========================================================================== */
@@ -227,12 +236,97 @@ html, body {
   border-color: rgba(239, 68, 68, 0.3);
 }
 
+/* ==========================================================================
+   Market Switcher Pill Group (Bharat vs Wall St)
+   ========================================================================== */
+.market-switcher-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  background: rgba(10, 16, 32, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--radius-full);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.market-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: var(--radius-full);
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  font-family: var(--font-heading);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.market-pill-btn .market-flag {
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.market-pill-btn .market-name {
+  font-weight: 700;
+}
+
+.market-pill-btn .market-badge {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: var(--radius-full);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+}
+
+.market-pill-btn:hover {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+/* Active State: US Wall Street */
+.market-pill-btn[data-market="US"].active {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.25) 0%, rgba(14, 116, 144, 0.35) 100%);
+  border-color: rgba(6, 182, 212, 0.7);
+  color: #00f0ff;
+  box-shadow: 0 0 16px rgba(0, 240, 255, 0.35);
+}
+
+.market-pill-btn[data-market="US"].active .market-badge {
+  background: rgba(0, 240, 255, 0.2);
+  color: #00f0ff;
+  border: 1px solid rgba(0, 240, 255, 0.4);
+}
+
+/* Active State: India Bharat */
+.market-pill-btn[data-market="IN"].active {
+  background: linear-gradient(135deg, rgba(249, 115, 22, 0.25) 0%, rgba(16, 185, 129, 0.25) 100%);
+  border-color: rgba(249, 115, 22, 0.75);
+  color: #fde047;
+  box-shadow: 0 0 18px rgba(249, 115, 22, 0.4);
+}
+
+.market-pill-btn[data-market="IN"].active .market-badge {
+  background: rgba(16, 185, 129, 0.25);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.45);
+}
+
 /* Header Controls */
 .header-actions {
   display: flex;
   align-items: center;
   gap: 10px;
 }
+
 
 .btn-hud {
   display: inline-flex;
@@ -262,6 +356,20 @@ html, body {
   background: rgba(0, 240, 255, 0.18);
   border-color: var(--color-primary);
   color: var(--color-primary);
+}
+
+#btn-mode-vr.active {
+  background: rgba(6, 182, 212, 0.22);
+  border-color: #06b6d4;
+  color: #38bdf8;
+  box-shadow: 0 0 16px rgba(6, 182, 212, 0.45);
+}
+
+#btn-mode-mr.active {
+  background: rgba(16, 185, 129, 0.22);
+  border-color: #10b981;
+  color: #34d399;
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.45);
 }
 
 .btn-hud svg {
@@ -1192,33 +1300,89 @@ html, body {
 .flex-2 { flex: 2; min-width: 180px; }
 
 /* ==========================================================================
-   Three.js VR Button Custom Styling
+   XR Launch Container & Dedicated VR / AR Buttons
    ========================================================================== */
-#VRButton {
-  position: fixed !important;
-  bottom: 24px !important;
-  left: 50% !important;
-  transform: translateX(-50%) !important;
-  z-index: 100 !important;
-  background: linear-gradient(135deg, #00f0ff 0%, #8b5cf6 100%) !important;
-  color: #030712 !important;
-  border: none !important;
-  border-radius: var(--radius-full) !important;
-  font-family: var(--font-body) !important;
-  font-weight: 700 !important;
-  font-size: 0.88rem !important;
-  letter-spacing: 0.05em !important;
-  text-transform: uppercase !important;
-  padding: 12px 28px !important;
-  box-shadow: 0 0 25px rgba(0, 240, 255, 0.4) !important;
-  transition: all 0.25s ease !important;
-  cursor: pointer !important;
-  opacity: 1 !important;
+.xr-launch-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-glass);
 }
 
-#VRButton:hover {
-  transform: translateX(-50%) scale(1.05) !important;
-  box-shadow: 0 0 35px rgba(0, 240, 255, 0.7) !important;
+.hud-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 18px;
+  border-radius: var(--radius-full);
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  outline: none;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.hud-btn.vr-btn {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.22) 0%, rgba(139, 92, 246, 0.32) 100%);
+  border-color: rgba(0, 240, 255, 0.45);
+  color: #ffffff;
+  box-shadow: 0 0 16px rgba(0, 240, 255, 0.25);
+}
+
+.hud-btn.vr-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.45) 0%, rgba(139, 92, 246, 0.55) 100%);
+  border-color: #00f0ff;
+  transform: translateY(-1.5px) scale(1.02);
+  box-shadow: 0 0 24px rgba(0, 240, 255, 0.55);
+}
+
+.hud-btn.ar-btn {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.22) 0%, rgba(6, 182, 212, 0.32) 100%);
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #ffffff;
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.25);
+}
+
+.hud-btn.ar-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.45) 0%, rgba(6, 182, 212, 0.55) 100%);
+  border-color: #10b981;
+  transform: translateY(-1.5px) scale(1.02);
+  box-shadow: 0 0 24px rgba(16, 185, 129, 0.55);
+}
+
+.hud-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: grayscale(0.7);
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+.hud-btn.active-session {
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
+  border-color: #f87171 !important;
+  color: #ffffff !important;
+  box-shadow: 0 0 25px rgba(239, 68, 68, 0.6) !important;
+}
+
+/* Hide 2D HTML DOM Overlays in WebXR to prevent desynchronization */
+body.in-xr #hud-container,
+body.in-xr #portfolio-modal,
+body.vr-mode #hud-container,
+body.vr-mode #portfolio-modal {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+#VRButton {
+  display: none !important;
 }
 
 /* ==========================================================================
