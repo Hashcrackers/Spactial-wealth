@@ -372,6 +372,37 @@ body.passthrough-mode #webgl-canvas {
   box-shadow: 0 0 16px rgba(16, 185, 129, 0.45);
 }
 
+.btn-stress-pill {
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #fcd34d;
+}
+
+.btn-stress-pill:hover {
+  background: rgba(180, 83, 9, 0.25);
+  border-color: #f59e0b;
+  color: #fbbf24;
+  box-shadow: 0 0 16px rgba(245, 158, 11, 0.35);
+}
+
+.btn-stress-pill.stress-active {
+  background: rgba(220, 38, 38, 0.3);
+  border-color: #ef4444;
+  color: #ffffff;
+  box-shadow: 0 0 20px rgba(239, 68, 68, 0.65), inset 0 0 12px rgba(239, 68, 68, 0.35);
+  animation: pulse-stress-glow 1.5s infinite alternate ease-in-out;
+}
+
+@keyframes pulse-stress-glow {
+  0% {
+    box-shadow: 0 0 12px rgba(239, 68, 68, 0.45);
+    border-color: #ef4444;
+  }
+  100% {
+    box-shadow: 0 0 24px rgba(239, 68, 68, 0.85), 0 0 35px rgba(249, 115, 22, 0.45);
+    border-color: #f97316;
+  }
+}
+
 .btn-hud svg {
   width: 16px;
   height: 16px;

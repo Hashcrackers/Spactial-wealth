@@ -21,10 +21,14 @@ import {
 } from './textures.js';
 import { soundFx } from './audio.js';
 import { cashFlowStreams, expenseStreams } from './data.js';
+import { attachPlanetStressComponents } from './solar-system.js';
 
 // Singleton persistent planets container
 export const planetsGroup = new THREE.Group();
 planetsGroup.name = 'PlanetsContainerGroup';
+if (typeof window !== 'undefined') {
+  window.planetsGroup = planetsGroup;
+}
 
 /**
  * Creates the central Star with convective solar granulation & balanced amber corona aura.
@@ -556,6 +560,9 @@ export function createPhotorealisticPlanet(item, index, count) {
     textLabel
   };
 
+  // Attach Defensive Golden Shields or Volatile Risk Stress-Test components
+  attachPlanetStressComponents(anchor, item, radius, orbitR);
+
   anchor.scale.set(1.0, 1.0, 1.0);
   return { anchor, primaryMesh, textLabel };
 }
@@ -740,8 +747,9 @@ export function updateCelestialAnimations(delta, elapsedTime, isAutoOrbiting = t
 
     if (isAutoOrbiting && data.orbitR) {
       data.angle += data.speed * delta * 0.7;
-      anchor.position.x = Math.cos(data.angle) * data.orbitR;
-      anchor.position.z = Math.sin(data.angle) * data.orbitR;
+      const currentOrbit = data.currentOrbitRadius || data.orbitR;
+      anchor.position.x = Math.cos(data.angle) * currentOrbit;
+      anchor.position.z = Math.sin(data.angle) * currentOrbit;
     }
 
     // Self-spin

@@ -50,6 +50,13 @@ import {
   tabletopPivot
 } from './scene.js';
 import {
+  createCentralMacroStar,
+  triggerMacroStressTest,
+  tickStressTest,
+  isStressTestActive,
+  onStressTestChange
+} from './solar-system.js';
+import {
   show3DSplineChart,
   render3DCandlestickChart,
   removeCurrentChart,
@@ -207,6 +214,17 @@ function init() {
   centralSun.userData.isTabletopAnchor = true;
   centralSun.userData.isGrabbable = true;
   solarSystemGroup.add(centralSun);
+  if (typeof window !== 'undefined') {
+    window.centralSun = centralSun;
+  }
+
+  // Central Celestial Benchmark Star & Black Hole Morph Architecture
+  const { centralMacroStarGroup, starMesh } = createCentralMacroStar();
+  solarSystemGroup.add(centralMacroStarGroup);
+  if (typeof window !== 'undefined') {
+    window.centralMacroStar = starMesh;
+    window.centralMacroStarGroup = centralMacroStarGroup;
+  }
 
   // Futuristic Tabletop Holographic Base Disc (Desk Anchor Dock)
   const baseRingGeo = new THREE.RingGeometry(1.5, 2.7, 64);
@@ -1264,6 +1282,15 @@ function onPointerClick(event) {
     }
   }
 
+  // Check Central Macro Star / Black Hole
+  if (typeof window !== 'undefined' && window.centralMacroStar) {
+    const starHits = mouseRaycaster.intersectObject(window.centralMacroStar, true);
+    if (starHits.length > 0) {
+      triggerMacroStressTest(!isStressTestActive);
+      return;
+    }
+  }
+
   // Check planets in planetsGroup (bubble up hierarchy to find ticker or asset node)
   const intersects = mouseRaycaster.intersectObjects(planetsGroup.children, true);
   if (intersects.length > 0) {
@@ -1367,6 +1394,25 @@ function setupEventListeners() {
       toggleAudioEngine();
     });
   }
+
+  // Macro Stress-Test / Black Hole Risk Simulation Desktop Button
+  const btnStressTest = document.getElementById('btn-stress-test');
+  if (btnStressTest) {
+    btnStressTest.addEventListener('click', () => {
+      triggerMacroStressTest(!isStressTestActive);
+    });
+  }
+
+  onStressTestChange((isActive) => {
+    const btn = document.getElementById('btn-stress-test');
+    if (btn) {
+      btn.classList.toggle('stress-active', isActive);
+      const iconSpan = btn.querySelector('.icon');
+      const textSpan = btn.querySelector('.btn-label');
+      if (iconSpan) iconSpan.textContent = isActive ? '🕳️' : '⚡';
+      if (textSpan) textSpan.textContent = isActive ? 'Black Hole: ACTIVE' : 'Stress Test';
+    }
+  });
 
   // Inspector Close
   const btnCloseCard = document.getElementById('btn-close-card');
@@ -1676,6 +1722,9 @@ function renderLoop(timestamp, frame) {
 
   // 5. Animate Celestial Bodies (Solar Core Granulation, Corona Flare, Planetary Rotation, Rings & Asteroid Belts)
   updateCelestialAnimations(delta, elapsedTime, isAutoOrbiting, centralSun);
+
+  // 5c. Animate Macro Stress-Test / Black Hole Collapse Simulation
+  tickStressTest(delta);
 
   // 5b. Animate Dynamic Galaxy Environment (Cosmic Starfield & Pulsar Flashes)
   updateGalaxyEnvironment(delta, elapsedTime);

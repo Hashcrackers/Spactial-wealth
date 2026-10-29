@@ -1,16 +1,65 @@
 import * as THREE from 'three';
 import * as TWEEN from '@tweenjs/tween.js';
 import { soundFx } from './audio.js';
+import {
+  triggerMacroStressTest,
+  isStressTestActive,
+  getStressProgress,
+  onStressTestChange,
+  isDefensiveAsset
+} from './solar-system.js';
 
 // ============================================================================
 // Multi-Window & Close Hitbox Registries
 // ============================================================================
 export const activeChartWindows = [];
+if (typeof window !== 'undefined') {
+  window.activeChartWindows = activeChartWindows;
+}
 export const closeHitboxRegistry = [];
 
 let currentGlobalScene = null;
 export function setChartsScene(scene) {
   currentGlobalScene = scene;
+}
+
+// Top of src/charts.js (Runs ONCE at startup, 0ms cost on click)
+let cachedGridWellMat = null;
+function getGridWellMaterial() {
+  if (cachedGridWellMat) return cachedGridWellMat;
+  const bgCanvas = document.createElement('canvas');
+  bgCanvas.width = 256;
+  bgCanvas.height = 128;
+  const ctx = bgCanvas.getContext('2d');
+
+  const grad = ctx.createRadialGradient(128, 64, 5, 128, 64, 120);
+  grad.addColorStop(0, 'rgba(14, 165, 233, 0.16)');
+  grad.addColorStop(1, 'rgba(2, 6, 23, 0.0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 256, 128);
+
+  ctx.strokeStyle = 'rgba(56, 189, 248, 0.08)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); // Batch all grid lines into ONE single draw call!
+  for (let x = 0; x <= 256; x += 16) {
+    ctx.moveTo(x, 0); ctx.lineTo(x, 128);
+  }
+  for (let y = 0; y <= 128; y += 16) {
+    ctx.moveTo(0, y); ctx.lineTo(256, y);
+  }
+  ctx.stroke();
+
+  const bgTex = new THREE.CanvasTexture(bgCanvas);
+  bgTex.generateMipmaps = false;
+  bgTex.minFilter = THREE.LinearFilter;
+
+  cachedGridWellMat = new THREE.MeshBasicMaterial({
+    map: bgTex,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide
+  });
+  return cachedGridWellMat;
 }
 
 // ============================================================================
@@ -27,17 +76,232 @@ export const RESOLUTION_PRESETS = [
   { id: 'ALL_1W',  label: 'ALL • 1W',  fullLabel: 'ALL • 1W',  count: 24, mult: 0.110 }
 ];
 
-// Helper to generate simulated realistic OHLCV candles
-function generateCandleData(basePrice = 120, count = 20, volatilityMult = 0.035) {
+// ============================================================================
+// Shared Zero-Allocation Asset Pools & Texture Caches
+// ============================================================================
+const sharedUnitBoxGeo = new THREE.BoxGeometry(1, 1, 1);
+sharedUnitBoxGeo.userData = { isShared: true };
+
+const sharedUnitCylinderGeo = new THREE.CylinderGeometry(1, 1, 1, 6);
+sharedUnitCylinderGeo.userData = { isShared: true };
+
+// Shared Candle Materials (Zero PBR recompilation overhead, crisp neon styling)
+const sharedGreenCandleMat = new THREE.MeshBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.95 });
+sharedGreenCandleMat.userData = { isShared: true };
+const sharedRedCandleMat = new THREE.MeshBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0.95 });
+sharedRedCandleMat.userData = { isShared: true };
+
+const sharedGreenWickMat = new THREE.MeshBasicMaterial({ color: 0x10b981 });
+sharedGreenWickMat.userData = { isShared: true };
+const sharedRedWickMat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
+sharedRedWickMat.userData = { isShared: true };
+
+const sharedGreenVolMat = new THREE.MeshBasicMaterial({ color: 0x10b981, transparent: true, opacity: 0.55 });
+sharedGreenVolMat.userData = { isShared: true };
+const sharedRedVolMat = new THREE.MeshBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0.55 });
+sharedRedVolMat.userData = { isShared: true };
+
+const hoveredCandleMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8 });
+hoveredCandleMat.userData = { isShared: true };
+
+// Texture Cache
+const staticTextureCache = new Map();
+function getOrCreateCachedTexture(key, width, height, renderFn) {
+  if (staticTextureCache.has(key)) return staticTextureCache.get(key);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  renderFn(ctx, width, height);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.generateMipmaps = false;
+  tex.minFilter = THREE.LinearFilter;
+  tex.userData = { isShared: true };
+  staticTextureCache.set(key, tex);
+  return tex;
+}
+
+function getSplineBtnTexture(isActive) {
+  return getOrCreateCachedTexture(`spline_btn_${isActive}`, 256, 80, (ctx) => {
+    ctx.fillStyle = isActive ? '#06b6d4' : '#111c30';
+    ctx.roundRect(4, 4, 248, 72, 14);
+    ctx.fill();
+    ctx.strokeStyle = isActive ? '#38bdf8' : '#334155';
+    ctx.lineWidth = 3;
+    ctx.roundRect(4, 4, 248, 72, 14);
+    ctx.stroke();
+    ctx.fillStyle = isActive ? '#ffffff' : '#94a3b8';
+    ctx.font = 'bold 26px "Inter", "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('📈 SPLINE', 128, 40);
+  });
+}
+
+function getCandlesBtnTexture(isActive) {
+  return getOrCreateCachedTexture(`candles_btn_${isActive}`, 270, 80, (ctx) => {
+    ctx.fillStyle = isActive ? '#06b6d4' : '#111c30';
+    ctx.roundRect(4, 4, 262, 72, 14);
+    ctx.fill();
+    ctx.strokeStyle = isActive ? '#38bdf8' : '#334155';
+    ctx.lineWidth = 3;
+    ctx.roundRect(4, 4, 262, 72, 14);
+    ctx.stroke();
+    ctx.fillStyle = isActive ? '#ffffff' : '#94a3b8';
+    ctx.font = 'bold 26px "Inter", "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('📊 CANDLES', 135, 40);
+  });
+}
+
+function getStressBtnTexture(isShock) {
+  return getOrCreateCachedTexture(`stress_btn_${isShock}`, 240, 80, (ctx) => {
+    if (isShock) {
+      ctx.fillStyle = '#dc2626';
+      ctx.roundRect(4, 4, 232, 72, 14);
+      ctx.fill();
+      ctx.strokeStyle = '#f87171';
+      ctx.lineWidth = 3;
+      ctx.roundRect(4, 4, 232, 72, 14);
+      ctx.stroke();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 26px "Inter", "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('🕳️ SHOCK', 120, 40);
+    } else {
+      ctx.fillStyle = '#1c1917';
+      ctx.roundRect(4, 4, 232, 72, 14);
+      ctx.fill();
+      ctx.strokeStyle = '#f59e0b';
+      ctx.lineWidth = 2.5;
+      ctx.roundRect(4, 4, 232, 72, 14);
+      ctx.stroke();
+      ctx.fillStyle = '#fcd34d';
+      ctx.font = 'bold 26px "Inter", "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('⚡ STRESS', 120, 40);
+    }
+  });
+}
+
+function getCloseBtnTexture() {
+  return getOrCreateCachedTexture('close_x_btn', 128, 128, (ctx) => {
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 64px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('✕', 64, 64);
+  });
+}
+
+function getWolfEggTexture() {
+  return getOrCreateCachedTexture('wolf_egg_dollar', 64, 64, (ctx) => {
+    ctx.fillStyle = '#0f172a';
+    ctx.font = 'bold 40px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('$', 32, 34);
+  });
+}
+
+function getTimeAxisTexture() {
+  return getOrCreateCachedTexture('time_axis_labels_unified', 1024, 64, (ctx) => {
+    ctx.fillStyle = '#64748b';
+    ctx.font = '22px -apple-system, BlinkMacSystemFont, "Segoe UI", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const timeLabels = ['09:30', '11:00', '12:30', '14:00', '15:30', '16:00'];
+    timeLabels.forEach((label, idx) => {
+      const fraction = idx / (timeLabels.length - 1);
+      const canvasX = 30 + fraction * (1024 - 60);
+      ctx.fillText(label, canvasX, 32);
+    });
+  });
+}
+
+function getTimeframePillTexture(preset, isActive) {
+  return getOrCreateCachedTexture(`tf_pill_${preset.id}_${isActive}`, 256, 84, (ctx) => {
+    ctx.fillStyle = isActive ? '#06b6d4' : '#111c30';
+    ctx.roundRect(4, 4, 248, 76, 14);
+    ctx.fill();
+
+    ctx.strokeStyle = isActive ? '#38bdf8' : '#334155';
+    ctx.lineWidth = 3;
+    ctx.roundRect(4, 4, 248, 76, 14);
+    ctx.stroke();
+
+    ctx.fillStyle = isActive ? '#ffffff' : '#94a3b8';
+    ctx.font = 'bold 27px "Inter", "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(preset.label, 128, 42);
+  });
+}
+
+function getStressBannerTexture(isDefensive) {
+  return getOrCreateCachedTexture(`stress_banner_${isDefensive}`, 1024, 70, (ctx) => {
+    if (isDefensive) {
+      ctx.fillStyle = 'rgba(234, 179, 8, 0.25)';
+      ctx.roundRect(4, 4, 1016, 62, 12);
+      ctx.fill();
+      ctx.strokeStyle = '#facc15';
+      ctx.lineWidth = 3;
+      ctx.roundRect(4, 4, 1016, 62, 12);
+      ctx.stroke();
+
+      ctx.fillStyle = '#fef08a';
+      ctx.font = 'bold 24px "Inter", "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('🛡️ DEFENSIVE GOLDEN SHIELD ACTIVE • HEDGED PORTFOLIO LIQUIDITY PRESERVED', 512, 35);
+    } else {
+      ctx.fillStyle = 'rgba(220, 38, 38, 0.30)';
+      ctx.roundRect(4, 4, 1016, 62, 12);
+      ctx.fill();
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 3;
+      ctx.roundRect(4, 4, 1016, 62, 12);
+      ctx.stroke();
+
+      ctx.fillStyle = '#fecaca';
+      ctx.font = 'bold 24px "Inter", "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('⚠️ MACRO STRESS-TEST ACTIVE: -35% LIQUIDITY SHOCK & BLACK HOLE COLLAPSE', 512, 35);
+    }
+  });
+}
+
+// Helper to generate simulated realistic OHLCV candles with Macro Stress-Test simulation
+function generateCandleData(basePrice = 120, count = 20, volatilityMult = 0.035, isStress = false, isDefensive = false) {
   const candles = [];
   let price = basePrice;
+  const stressStartIndex = Math.max(1, Math.floor(count * 0.65));
+
   for (let i = 0; i < count; i++) {
-    const delta = (Math.random() - 0.48) * (basePrice * volatilityMult);
+    let delta = (Math.random() - 0.48) * (basePrice * volatilityMult);
+
+    // If Macro Stress-Test is active, simulate systemic black hole market shock on latter candles
+    if (isStress && i >= stressStartIndex) {
+      if (isDefensive) {
+        // Defensive hedge assets (IVV, TLT, BND, USD Cash) hold value (-1.5% to -2.5% safe-haven preservation)
+        delta = (Math.random() - 0.52) * (basePrice * volatilityMult * 0.45);
+      } else {
+        // High-beta growth tech & crypto experience catastrophic black hole collapse (-35% to -48% drawdown)
+        delta = -Math.abs((Math.random() * 0.07 + 0.05) * basePrice);
+      }
+    }
+
     const open = price;
     const close = Math.max(1, open + delta);
     const high = Math.max(open, close) + Math.random() * (basePrice * volatilityMult * 0.55);
     const low = Math.max(0.5, Math.min(open, close) - Math.random() * (basePrice * volatilityMult * 0.55));
-    const volume = Math.random() * 0.14 + 0.025;
+    const volume = (isStress && i >= stressStartIndex)
+      ? Math.random() * 0.42 + 0.28 // Liquidation volume surge during black hole collapse
+      : Math.random() * 0.14 + 0.025;
     candles.push({
       open,
       close,
@@ -94,6 +358,8 @@ function buildHeader(chartWin, ticker, assetData) {
   ctx.fillText(`${assetType} • Allocation: ${alloc}% • 24h Return: +${ret}%      TOTAL NET WORTH: $1,245,000`, 16, 114);
 
   const tex = new THREE.CanvasTexture(canvas);
+  tex.generateMipmaps = false;
+  tex.minFilter = THREE.LinearFilter;
   // Pinned flat to the slate at z = 0.015m with THREE.PlaneGeometry (NO SPRITES - stops text sliding)
   const headerGeo = new THREE.PlaneGeometry(0.70, 0.125);
   const headerMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
@@ -141,18 +407,9 @@ export function attachWolfEggButton(chartWin) {
   eggBtnGroup.add(badgeMesh);
 
   // 2. Dollar Icon Text
-  const canvas = document.createElement('canvas');
-  canvas.width = 64; canvas.height = 64;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#0f172a';
-  ctx.font = 'bold 40px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('$', 32, 34);
-  const tex = new THREE.CanvasTexture(canvas);
   const textMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(0.045, 0.045),
-    new THREE.MeshBasicMaterial({ map: tex, transparent: true })
+    new THREE.MeshBasicMaterial({ map: getWolfEggTexture(), transparent: true })
   );
   textMesh.position.z = 0.005;
   textMesh.raycast = () => {};
@@ -188,29 +445,15 @@ export function attachWolfEggButton(chartWin) {
 // 2. Top-Right Mode Toggles & Close Button
 // ---------------------------------------------------------------------------
 function buildTopControls(chartWin, scene) {
-  // 1. [ 📈 SPLINE ] Toggle Button (Inactive default, dark glass)
-  const splineCanvas = document.createElement('canvas');
-  splineCanvas.width = 256; splineCanvas.height = 80;
-  const sCtx = splineCanvas.getContext('2d');
-  sCtx.fillStyle = '#111c30';
-  sCtx.roundRect(4, 4, 248, 72, 14);
-  sCtx.fill();
-  sCtx.strokeStyle = '#334155';
-  sCtx.lineWidth = 3;
-  sCtx.roundRect(4, 4, 248, 72, 14);
-  sCtx.stroke();
-  sCtx.fillStyle = '#94a3b8';
-  sCtx.font = 'bold 26px "Inter", "Segoe UI", sans-serif';
-  sCtx.textAlign = 'center';
-  sCtx.textBaseline = 'middle';
-  sCtx.fillText('📈 SPLINE', 128, 40);
+  const currentMode = chartWin.userData.displayMode || 'candles';
+  const isCandle = currentMode === 'candles' || currentMode === 'candlestick';
 
-  const splineTex = new THREE.CanvasTexture(splineCanvas);
+  // 1. [ 📈 SPLINE ] Toggle Button (Inactive default, dark glass)
   const splinePill = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.115, 0.042),
-    new THREE.MeshBasicMaterial({ map: splineTex, transparent: true, side: THREE.DoubleSide })
+    new THREE.PlaneGeometry(0.108, 0.042),
+    new THREE.MeshBasicMaterial({ map: getSplineBtnTexture(!isCandle), transparent: true, side: THREE.DoubleSide })
   );
-  splinePill.position.set(0.33, 0.32, 0.02);
+  splinePill.position.set(0.275, 0.32, 0.02);
   splinePill.userData.isChartModeToggle = true;
   splinePill.userData.targetMode = 'spline';
   splinePill.userData.parentWindow = chartWin;
@@ -219,28 +462,11 @@ function buildTopControls(chartWin, scene) {
   chartWin.userData.btnSpline = splinePill;
 
   // 2. [ 📊 CANDLES ] Toggle Button (Active cyan highlight)
-  const candleCanvas = document.createElement('canvas');
-  candleCanvas.width = 270; candleCanvas.height = 80;
-  const cCtx = candleCanvas.getContext('2d');
-  cCtx.fillStyle = '#06b6d4';
-  cCtx.roundRect(4, 4, 262, 72, 14);
-  cCtx.fill();
-  cCtx.strokeStyle = '#38bdf8';
-  cCtx.lineWidth = 3;
-  cCtx.roundRect(4, 4, 262, 72, 14);
-  cCtx.stroke();
-  cCtx.fillStyle = '#ffffff';
-  cCtx.font = 'bold 26px "Inter", "Segoe UI", sans-serif';
-  cCtx.textAlign = 'center';
-  cCtx.textBaseline = 'middle';
-  cCtx.fillText('📊 CANDLES', 135, 40);
-
-  const candleTex = new THREE.CanvasTexture(candleCanvas);
   const candlePill = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.125, 0.042),
-    new THREE.MeshBasicMaterial({ map: candleTex, transparent: true, side: THREE.DoubleSide })
+    new THREE.PlaneGeometry(0.114, 0.042),
+    new THREE.MeshBasicMaterial({ map: getCandlesBtnTexture(isCandle), transparent: true, side: THREE.DoubleSide })
   );
-  candlePill.position.set(0.46, 0.32, 0.02);
+  candlePill.position.set(0.392, 0.32, 0.02);
   candlePill.userData.isChartModeToggle = true;
   candlePill.userData.targetMode = 'candles';
   candlePill.userData.parentWindow = chartWin;
@@ -248,8 +474,37 @@ function buildTopControls(chartWin, scene) {
   chartWin.add(candlePill);
   chartWin.userData.btnCandles = candlePill;
 
-  // 3. Integrated [ ✕ ] close icon in the top right corner (x = 0.58, y = 0.32, z = 0.02)
-  const closeGeo = new THREE.PlaneGeometry(0.055, 0.046);
+  // 3. [ ⚡ STRESS ] Portfolio Macro Stress-Test / Black Hole Shock Button
+  const stressPill = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.096, 0.042),
+    new THREE.MeshBasicMaterial({ map: getStressBtnTexture(isStressTestActive), transparent: true, side: THREE.DoubleSide })
+  );
+  stressPill.position.set(0.505, 0.32, 0.02);
+  stressPill.userData.isStressButton = true;
+  stressPill.userData.parentWindow = chartWin;
+  const onStressClick = () => triggerMacroStressTest(!isStressTestActive);
+  stressPill.userData.onClick = onStressClick;
+  chartWin.add(stressPill);
+  chartWin.userData.btnStress = stressPill;
+  chartWin.userData.redrawStressButton = (active) => {
+    stressPill.material.map = getStressBtnTexture(active);
+    stressPill.material.needsUpdate = true;
+  };
+
+  // 3b. Forward-Facing 3D Hitbox for Stress Raycasting
+  const stressHitGeo = new THREE.BoxGeometry(0.10, 0.06, 0.08);
+  const stressHitMat = new THREE.MeshBasicMaterial({ visible: false });
+  const stressHitbox = new THREE.Mesh(stressHitGeo, stressHitMat);
+  stressHitbox.position.set(0.505, 0.32, 0.05);
+  stressHitbox.userData.isStressButton = true;
+  stressHitbox.userData.parentWindow = chartWin;
+  stressHitbox.userData.parentChart = chartWin;
+  stressHitbox.userData.onClick = onStressClick;
+  chartWin.add(stressHitbox);
+  chartWin.userData.stressHitbox = stressHitbox;
+
+  // 4. Integrated [ ✕ ] close icon in the top right corner
+  const closeGeo = new THREE.PlaneGeometry(0.046, 0.042);
   const closeMat = new THREE.MeshBasicMaterial({
     color: 0x221318,
     transparent: true,
@@ -257,35 +512,26 @@ function buildTopControls(chartWin, scene) {
     side: THREE.DoubleSide
   });
   const closeBtn = new THREE.Mesh(closeGeo, closeMat);
-  closeBtn.position.set(0.58, 0.32, 0.02);
+  closeBtn.position.set(0.592, 0.32, 0.02);
   closeBtn.userData.isCloseButton = true;
   closeBtn.userData.parentWindow = chartWin;
   chartWin.add(closeBtn);
   chartWin.userData.closeBtn = closeBtn;
 
-  // Close Icon text (Clean white ✕ centered inside, z = 0.022m) - Static Mesh Plane (NOT a Sprite)
-  const xCanvas = document.createElement('canvas');
-  xCanvas.width = 128; xCanvas.height = 128;
-  const xCtx = xCanvas.getContext('2d');
-  xCtx.fillStyle = '#ffffff';
-  xCtx.font = 'bold 64px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-  xCtx.textAlign = 'center';
-  xCtx.textBaseline = 'middle';
-  xCtx.fillText('✕', 64, 64);
-  const xTex = new THREE.CanvasTexture(xCanvas);
+  // Close Icon text (Clean white ✕ centered inside, z = 0.022m)
   const xMesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.038, 0.038),
-    new THREE.MeshBasicMaterial({ map: xTex, transparent: true, side: THREE.DoubleSide })
+    new THREE.PlaneGeometry(0.034, 0.034),
+    new THREE.MeshBasicMaterial({ map: getCloseBtnTexture(), transparent: true, side: THREE.DoubleSide })
   );
-  xMesh.position.set(0.58, 0.32, 0.022);
+  xMesh.position.set(0.592, 0.32, 0.022);
   xMesh.raycast = () => {}; // Non-blocking
   chartWin.add(xMesh);
 
   // Forward-Facing 3D Hitbox for raycasting (z = 0.05m)
-  const hitBoxGeo = new THREE.BoxGeometry(0.12, 0.10, 0.08);
+  const hitBoxGeo = new THREE.BoxGeometry(0.10, 0.10, 0.08);
   const hitBoxMat = new THREE.MeshBasicMaterial({ visible: false });
   const closeHitbox = new THREE.Mesh(hitBoxGeo, hitBoxMat);
-  closeHitbox.position.set(0.58, 0.32, 0.05);
+  closeHitbox.position.set(0.592, 0.32, 0.05);
   closeHitbox.userData.isCloseHitbox = true;
   closeHitbox.userData.isCloseButton = true;
   closeHitbox.userData.parentWindow = chartWin;
@@ -297,6 +543,28 @@ function buildTopControls(chartWin, scene) {
   const handleClose = () => closeChartWindow(chartWin, scene);
   closeBtn.userData.onClick = handleClose;
   closeHitbox.userData.onClick = handleClose;
+}
+
+// ---------------------------------------------------------------------------
+// 2b. Dynamic Floating Stress-Test Alert Banner
+// ---------------------------------------------------------------------------
+function buildStressAlertBanner(chartWin, assetData = {}) {
+  const isDefensive = isDefensiveAsset(assetData);
+  const bannerMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.88, 0.052),
+    new THREE.MeshBasicMaterial({ map: getStressBannerTexture(isDefensive), transparent: true, side: THREE.DoubleSide })
+  );
+  bannerMesh.position.set(-0.06, 0.245, 0.02);
+  bannerMesh.visible = isStressTestActive;
+  bannerMesh.raycast = () => {};
+  chartWin.add(bannerMesh);
+
+  chartWin.userData.stressBanner = bannerMesh;
+  chartWin.userData.redrawStressBanner = (active) => {
+    bannerMesh.material.map = getStressBannerTexture(isDefensive);
+    bannerMesh.material.needsUpdate = true;
+    bannerMesh.visible = active;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -377,18 +645,12 @@ export function createSplineGroup(candleData) {
   splineGroup.add(fillMesh);
 
   // 4. Volume Bars in Spline Mode:
-  // Clone or retain the volume bars at the base so spatial depth is preserved
   const volGroup = new THREE.Group();
   candleData.forEach((c, idx) => {
     const x = startX + idx * stepX;
     const volHeight = Math.max(0.015, (c.volume || 0.05) * 0.8);
-    const volGeo = new THREE.BoxGeometry(0.022, volHeight, 0.018);
-    const volMat = new THREE.MeshBasicMaterial({
-      color: c.close >= c.open ? 0x10b981 : 0xef4444,
-      transparent: true,
-      opacity: 0.45
-    });
-    const volMesh = new THREE.Mesh(volGeo, volMat);
+    const volMesh = new THREE.Mesh(sharedUnitBoxGeo, c.close >= c.open ? sharedGreenVolMat : sharedRedVolMat);
+    volMesh.scale.set(0.022, volHeight, 0.018);
     volMesh.position.set(x, baseY + volHeight * 0.5, 0.03);
     volMesh.raycast = () => {};
     volGroup.add(volMesh);
@@ -407,42 +669,38 @@ export const buildSplineVisualization = (chartWin, candleData) => {
 // ---------------------------------------------------------------------------
 function renderChartDataContent(chartWin, basePrice, presetMultiplier = 0.035, candleCount = 20) {
   // Clear any existing chart content, candleGroup, and splineGroup directly attached to chartWin
+  const disposeIfNonShared = (child) => {
+    if (child.geometry && !child.geometry.userData?.isShared) child.geometry.dispose();
+    if (child.material) {
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      mats.forEach((m) => {
+        if (!m.userData?.isShared) {
+          if (m.map && !m.map.userData?.isShared) m.map.dispose();
+          m.dispose();
+        }
+      });
+    }
+  };
+
   if (chartWin.userData.chartContentGroup) {
     chartWin.remove(chartWin.userData.chartContentGroup);
-    chartWin.userData.chartContentGroup.traverse((child) => {
-      if (child.geometry) child.geometry.dispose();
-      if (child.material) {
-        if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
-        else child.material.dispose();
-      }
-    });
+    chartWin.userData.chartContentGroup.traverse(disposeIfNonShared);
   }
   if (chartWin.userData.candleGroup) {
     chartWin.remove(chartWin.userData.candleGroup);
-    chartWin.userData.candleGroup.traverse((child) => {
-      if (child.geometry) child.geometry.dispose();
-      if (child.material) {
-        if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
-        else child.material.dispose();
-      }
-    });
+    chartWin.userData.candleGroup.traverse(disposeIfNonShared);
   }
   if (chartWin.userData.splineGroup) {
     chartWin.remove(chartWin.userData.splineGroup);
-    chartWin.userData.splineGroup.traverse((child) => {
-      if (child.geometry) child.geometry.dispose();
-      if (child.material) {
-        if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
-        else child.material.dispose();
-      }
-    });
+    chartWin.userData.splineGroup.traverse(disposeIfNonShared);
   }
 
   const contentGroup = new THREE.Group();
   chartWin.add(contentGroup);
   chartWin.userData.chartContentGroup = contentGroup;
 
-  const candles = generateCandleData(basePrice, candleCount, presetMultiplier);
+  const isDef = isDefensiveAsset(chartWin.userData?.headerData || { ticker: chartWin.userData?.ticker });
+  const candles = generateCandleData(basePrice, candleCount, presetMultiplier, isStressTestActive, isDef);
   chartWin.userData.candles = candles;
 
   let minP = Infinity;
@@ -495,21 +753,18 @@ function renderChartDataContent(chartWin, basePrice, presetMultiplier = 0.035, c
     const bodyHeight = Math.max(0.014, Math.abs(yClose - yOpen));
     const bodyCenterY = (yOpen + yClose) * 0.5;
 
-    // 1. Candlestick 3D Box Body (width 0.030m, height bodyHeight, depth 0.035m at z = 0.055m)
-    const bodyGeo = new THREE.BoxGeometry(0.030, bodyHeight, 0.035);
-    const bodyMat = new THREE.MeshStandardMaterial({
-      color,
-      emissive: isGreen ? 0x065f46 : 0x991b1b,
-      emissiveIntensity: 0.35,
-      roughness: 0.25,
-      metalness: 0.2,
-      transparent: true,
-      opacity: 0.95
-    });
-    const candleMesh = new THREE.Mesh(bodyGeo, bodyMat);
+    // 1. Candlestick 3D Box Body (Zero-allocation unit geometry + shared material)
+    const candleMesh = new THREE.Mesh(sharedUnitBoxGeo, isGreen ? sharedGreenCandleMat : sharedRedCandleMat);
+    candleMesh.scale.set(0.030, bodyHeight, 0.035);
     candleMesh.position.set(xPos, bodyCenterY, 0.055);
     candleMesh.userData = {
       isCandle: true,
+      baseScale: new THREE.Vector3(
+        candleMesh.scale.x,
+        candleMesh.scale.y,
+        candleMesh.scale.z
+      ),
+      isGreen,
       candleData: { open: c.open, close: c.close, high: c.high, low: c.low, date: c.date || '12:30' },
       parentChart: chartWin,
       parentWindow: chartWin,
@@ -524,36 +779,20 @@ function renderChartDataContent(chartWin, basePrice, presetMultiplier = 0.035, c
     candleGroup.add(candleMesh);
     const body = candleMesh;
 
-    // 2. Wick (Slim central cylinder, radius 0.0018m, radialSegments 6 at z = 0.055m)
+    // 2. Wick (Zero-allocation cylinder geometry + shared material)
     const yHigh = mapPriceToY(c.high);
     const yLow = mapPriceToY(c.low);
     const wickHeight = Math.max(0.03, yHigh - yLow);
-    const wickGeo = new THREE.CylinderGeometry(0.0018, 0.0018, wickHeight, 6);
-    const wickMat = new THREE.MeshStandardMaterial({
-      color,
-      emissive: isGreen ? 0x065f46 : 0x991b1b,
-      emissiveIntensity: 0.35,
-      roughness: 0.3,
-      metalness: 0.5
-    });
-    const wick = new THREE.Mesh(wickGeo, wickMat);
+    const wick = new THREE.Mesh(sharedUnitCylinderGeo, isGreen ? sharedGreenWickMat : sharedRedWickMat);
+    wick.scale.set(0.0018, wickHeight, 0.0018);
     wick.position.set(xPos, (yHigh + yLow) * 0.5, 0.055);
     wick.raycast = () => {}; // Non-blocking
     candleGroup.add(wick);
 
-    // 3. Semi-transparent Volume Pillar at bottom (width 0.026m, depth 0.025m at z = 0.025m)
+    // 3. Semi-transparent Volume Pillar at bottom
     const volHeight = Math.max(0.015, c.volume * 0.65);
-    const volGeo = new THREE.BoxGeometry(0.026, volHeight, 0.025);
-    const volMat = new THREE.MeshStandardMaterial({
-      color,
-      emissive: isGreen ? 0x065f46 : 0x991b1b,
-      emissiveIntensity: 0.18,
-      roughness: 0.35,
-      metalness: 0.15,
-      transparent: true,
-      opacity: 0.55
-    });
-    const vol = new THREE.Mesh(volGeo, volMat);
+    const vol = new THREE.Mesh(sharedUnitBoxGeo, isGreen ? sharedGreenVolMat : sharedRedVolMat);
+    vol.scale.set(0.026, volHeight, 0.025);
     vol.position.set(xPos, -0.25 + volHeight * 0.5, 0.025);
     vol.raycast = () => {}; // Non-blocking
     candleGroup.add(vol);
@@ -621,6 +860,8 @@ function renderChartDataContent(chartWin, basePrice, presetMultiplier = 0.035, c
     ctx.fillText(`$${priceVal.toFixed(1)}`, 8, 24);
 
     const tex = new THREE.CanvasTexture(canvas);
+    tex.generateMipmaps = false;
+    tex.minFilter = THREE.LinearFilter;
     const pGeo = new THREE.PlaneGeometry(0.09, 0.027);
     const pMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
     const pMesh = new THREE.Mesh(pGeo, pMat);
@@ -630,28 +871,10 @@ function renderChartDataContent(chartWin, basePrice, presetMultiplier = 0.035, c
   }
 
   // ==========================================
-  // D. Time Axis & Volume Pillars Alignment
+  // D. Time Axis & Volume Pillars Alignment (Zero-allocation cached texture)
   // ==========================================
-  // Horizontal time labels above bottom buttons: 09:30 11:00 12:30 14:00 15:30 16:00
-  const timeCanvas = document.createElement('canvas');
-  timeCanvas.width = 1024;
-  timeCanvas.height = 64;
-  const tCtx = timeCanvas.getContext('2d');
-  tCtx.fillStyle = '#64748b';
-  tCtx.font = '22px -apple-system, BlinkMacSystemFont, "Segoe UI", monospace';
-  tCtx.textAlign = 'center';
-  tCtx.textBaseline = 'middle';
-
-  const timeLabels = ['09:30', '11:00', '12:30', '14:00', '15:30', '16:00'];
-  timeLabels.forEach((label, idx) => {
-    const fraction = idx / (timeLabels.length - 1);
-    const canvasX = 30 + fraction * (1024 - 60);
-    tCtx.fillText(label, canvasX, 32);
-  });
-
-  const timeTex = new THREE.CanvasTexture(timeCanvas);
   const timeGeo = new THREE.PlaneGeometry(totalChartWidth + 0.06, 0.032);
-  const timeMat = new THREE.MeshBasicMaterial({ map: timeTex, transparent: true, side: THREE.DoubleSide });
+  const timeMat = new THREE.MeshBasicMaterial({ map: getTimeAxisTexture(), transparent: true, side: THREE.DoubleSide });
   const timeMesh = new THREE.Mesh(timeGeo, timeMat);
   timeMesh.position.set((startX + endX) * 0.5, -0.275, 0.015);
   timeMesh.raycast = () => {}; // Non-blocking
@@ -683,6 +906,8 @@ function renderChartDataContent(chartWin, basePrice, presetMultiplier = 0.035, c
   const tooltipCanvas = document.createElement('canvas');
   tooltipCanvas.width = 384; tooltipCanvas.height = 96;
   const tooltipTex = new THREE.CanvasTexture(tooltipCanvas);
+  tooltipTex.generateMipmaps = false;
+  tooltipTex.minFilter = THREE.LinearFilter;
   const tooltipMat = new THREE.MeshBasicMaterial({ map: tooltipTex, transparent: true, depthTest: false });
   const tooltipMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.32, 0.08), tooltipMat);
   tooltipMesh.position.set(0, 0.22, 0.08);
@@ -713,31 +938,12 @@ function buildTimeframePills(chartWin, activePresetId = '1M_30m') {
     const xPos = startX + i * (pillWidth + gap);
     const isActive = preset.id === activePresetId || preset.label === activePresetId;
 
-    const canvas = document.createElement('canvas');
-    canvas.width = 256; canvas.height = 84;
-    const ctx = canvas.getContext('2d');
-
-    // Background pill shape
-    ctx.fillStyle = isActive ? '#06b6d4' : '#111c30';
-    ctx.roundRect(4, 4, 248, 76, 14);
-    ctx.fill();
-
-    // Subtle outline border
-    ctx.strokeStyle = isActive ? '#38bdf8' : '#334155';
-    ctx.lineWidth = 3;
-    ctx.roundRect(4, 4, 248, 76, 14);
-    ctx.stroke();
-
-    // Preset label text
-    ctx.fillStyle = isActive ? '#ffffff' : '#94a3b8';
-    ctx.font = 'bold 27px "Inter", "Segoe UI", sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(preset.label, 128, 42);
-
-    const tex = new THREE.CanvasTexture(canvas);
     const geo = new THREE.PlaneGeometry(pillWidth, pillHeight);
-    const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
+    const mat = new THREE.MeshBasicMaterial({
+      map: getTimeframePillTexture(preset, isActive),
+      transparent: true,
+      side: THREE.DoubleSide
+    });
     const pillMesh = new THREE.Mesh(geo, mat);
     pillMesh.position.set(xPos, rowY, 0.035);
 
@@ -757,12 +963,180 @@ function buildTimeframePills(chartWin, activePresetId = '1M_30m') {
 }
 
 // ---------------------------------------------------------------------------
+// 4b. Decorative Sci-Fi Spatial HUD Window Chrome
+// ---------------------------------------------------------------------------
+const chromeHandleGeo = new THREE.PlaneGeometry(0.24, 0.008);
+const chromeHandleMat = new THREE.MeshBasicMaterial({
+  color: 0xe2e8f0,
+  transparent: true,
+  opacity: 0.45,
+  side: THREE.DoubleSide
+});
+const chromeBracketMat = new THREE.MeshBasicMaterial({
+  color: 0x38bdf8,
+  transparent: true,
+  opacity: 0.85,
+  side: THREE.DoubleSide
+});
+const chromeHArmGeo = new THREE.PlaneGeometry(0.06, 0.004);
+const chromeVArmGeo = new THREE.PlaneGeometry(0.004, 0.06);
+const chromeRailGeo = new THREE.PlaneGeometry(1.22, 0.0025);
+const chromeRailMat = new THREE.MeshBasicMaterial({
+  color: 0x0ea5e9,
+  transparent: true,
+  opacity: 0.35,
+  side: THREE.DoubleSide
+});
+const chromeGridWellGeo = new THREE.PlaneGeometry(1.18, 0.50);
+
+function addSpatialWindowChrome(chartWin) {
+  const chromeGroup = new THREE.Group();
+  chromeGroup.name = "spatialWindowChrome";
+
+  // 1. VisionOS / Quest Style Top Window Grab Bar Pill
+  const handleMesh = new THREE.Mesh(chromeHandleGeo, chromeHandleMat);
+  handleMesh.position.set(0, 0.425, 0.01);
+  handleMesh.raycast = () => {};
+  chromeGroup.add(handleMesh);
+
+  // 2. Glowing Cyan HUD Corner Brackets (4 Corners)
+  const w = 0.65; // Half-width of slate
+  const h = 0.40; // Half-height of slate
+  const len = 0.06; // Bracket arm length
+
+  const corners = [
+    { x: -w, y: h, sx: 1, sy: -1 },  // Top-Left
+    { x: w, y: h, sx: -1, sy: -1 },  // Top-Right
+    { x: -w, y: -h, sx: 1, sy: 1 },  // Bottom-Left
+    { x: w, y: -h, sx: -1, sy: 1 }   // Bottom-Right
+  ];
+
+  corners.forEach(c => {
+    // Horizontal arm
+    const hArm = new THREE.Mesh(chromeHArmGeo, chromeBracketMat);
+    hArm.position.set(c.x + (c.sx * len * 0.5), c.y, 0.012);
+    hArm.raycast = () => {};
+    chromeGroup.add(hArm);
+
+    // Vertical arm
+    const vArm = new THREE.Mesh(chromeVArmGeo, chromeBracketMat);
+    vArm.position.set(c.x, c.y + (c.sy * len * 0.5), 0.012);
+    vArm.raycast = () => {};
+    chromeGroup.add(vArm);
+  });
+
+  // 3. Header & Footer Glowing Divider Rails
+  const topRail = new THREE.Mesh(chromeRailGeo, chromeRailMat);
+  topRail.position.set(0, 0.245, 0.008); // Separates header from chart area
+  topRail.raycast = () => {};
+  chromeGroup.add(topRail);
+
+  const bottomRail = new THREE.Mesh(chromeRailGeo, chromeRailMat);
+  bottomRail.position.set(0, -0.275, 0.008); // Separates chart area from bottom buttons
+  bottomRail.raycast = () => {};
+  chromeGroup.add(bottomRail);
+
+  // 4. Subtle Holographic Grid & Radial Glow Backdrop inside the Data Well
+  const gridWellMesh = new THREE.Mesh(
+    chromeGridWellGeo,
+    getGridWellMaterial()
+  );
+  gridWellMesh.position.set(0, -0.015, 0.006);
+  gridWellMesh.raycast = () => {};
+  chromeGroup.add(gridWellMesh);
+
+  chartWin.add(chromeGroup);
+}
+
+// ============================================================================
+// Spatial Ergonomics Configuration & Radial Cockpit Arc Math
+// ============================================================================
+export const ARC_CONFIG = {
+  radius: 1.55,           // Distance in meters from headset (comfortable arm's reach)
+  elevation: 0.12,        // Slightly elevated above eye level to clear wrist menus
+  // Slot angles in radians: Left (-28°), Center (0°), Right (+28°)
+  // 28 degrees gives clean ~10cm visual margins between 1.34m wide slates
+  slotAngles: [-0.488, 0.0, 0.488] 
+};
+
+export function positionChartInSlot(chartWin, slotIndex, camera) {
+  const targetCam = camera || (typeof window !== 'undefined' ? window.camera : null);
+  if (!chartWin || !targetCam) return;
+
+  const angle = ARC_CONFIG.slotAngles[slotIndex] ?? 0.0;
+
+  // 1. Get current forward and right directions from camera
+  const forward = new THREE.Vector3();
+  if (targetCam.getWorldDirection) {
+    targetCam.getWorldDirection(forward);
+  } else if (targetCam.quaternion) {
+    forward.set(0, 0, -1).applyQuaternion(targetCam.quaternion);
+  } else {
+    forward.set(0, 0, -1);
+  }
+  forward.y = 0;
+  if (forward.lengthSq() < 0.001) forward.set(0, 0, -1);
+  forward.normalize();
+
+  const up = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3().crossVectors(forward, up).normalize();
+
+  // 2. Compute position along horizontal circle around camera position
+  const camPos = targetCam.position ? targetCam.position.clone() : new THREE.Vector3(0, 1.5, 0);
+  
+  // Rotate forward vector by 'angle' around world up axis
+  const dir = forward.clone().applyAxisAngle(up, -angle);
+  
+  const targetPos = camPos.clone()
+    .add(dir.multiplyScalar(ARC_CONFIG.radius));
+  
+  // Apply elevation offset
+  targetPos.y = camPos.y + ARC_CONFIG.elevation;
+  chartWin.position.copy(targetPos);
+
+  // 3. Aim chart precisely at the user's eye level (facing tangent to circle)
+  chartWin.lookAt(camPos.x, targetPos.y, camPos.z);
+
+  // Store metadata
+  chartWin.userData.slotIndex = slotIndex;
+}
+
+export function updateAllChartSlots(camera = null) {
+  const targetCam = camera || (typeof window !== 'undefined' ? window.camera : null);
+  const chartList = (typeof window !== 'undefined' && window.activeChartWindows)
+    ? window.activeChartWindows
+    : activeChartWindows;
+  if (!chartList || !targetCam) return;
+  
+  // Filter only visible/active windows
+  const openCharts = chartList.filter(w => w && w.visible !== false);
+
+  openCharts.forEach((chartWin, idx) => {
+    // Center single charts, split 2 charts into Left & Right, or fill all 3
+    let targetSlot = 1; // Default Center
+    if (openCharts.length === 2) {
+      targetSlot = idx === 0 ? 0 : 2; // Left & Right
+    } else if (openCharts.length === 3) {
+      targetSlot = idx; // 0: Left, 1: Center, 2: Right
+    }
+    positionChartInSlot(chartWin, targetSlot, targetCam);
+  });
+}
+
+export const repositionActiveCharts = updateAllChartSlots;
+
+// ---------------------------------------------------------------------------
 // 5. Main Multi-Window Spawner
 // ---------------------------------------------------------------------------
 export function openOrFocusChart(ticker, assetData = {}, camera = null, scene = null) {
+  console.time(`[Chart Open] Total time for ${ticker}`);
+
   const targetCam = camera || (typeof window !== 'undefined' ? window.camera : null);
   const targetScene = scene || currentGlobalScene || (typeof window !== 'undefined' ? window.scene : null);
-  if (!ticker || !targetCam || !targetScene) return;
+  if (!ticker || !targetCam || !targetScene) {
+    console.timeEnd(`[Chart Open] Total time for ${ticker}`);
+    return;
+  }
   if (targetScene) currentGlobalScene = targetScene;
 
   // 1. If this ticker is ALREADY open, highlight it and bring forward
@@ -770,76 +1144,44 @@ export function openOrFocusChart(ticker, assetData = {}, camera = null, scene = 
   const existing = activeChartWindows.find(win => win.userData.ticker === ticker || win.userData.ticker === sym);
   if (existing) {
     pulseChartHighlight(existing);
+    console.timeEnd(`[Chart Open] Total time for ${ticker}`);
     return existing;
   }
 
-  // 2. Determine an available slot (0: Center, 1: Right, 2: Left)
-  const occupiedSlots = activeChartWindows.map(win => win.userData.slotIndex);
-  let targetSlot = 0;
-  for (let s = 0; s < 3; s++) {
-    if (!occupiedSlots.includes(s)) {
-      targetSlot = s;
-      break;
-    }
+  console.time('[Chart Open] 1. Data retrieval');
+  // ... data fetch or generation ...
+  let rawNumeric = assetData.priceNumeric;
+  if (!rawNumeric && assetData.price) {
+    const cleaned = String(assetData.price).replace(/[^0-9.-]+/g, '');
+    rawNumeric = parseFloat(cleaned);
   }
+  const basePrice = (rawNumeric && !isNaN(rawNumeric)) ? rawNumeric : 140;
+  console.timeEnd('[Chart Open] 1. Data retrieval');
 
+  console.time('[Chart Open] 2. Geometry & Mesh construction');
   // If 3 windows are already open, replace the oldest one cleanly
   if (activeChartWindows.length >= 3) {
     const oldest = activeChartWindows[0];
     closeChartWindow(oldest, targetScene);
   }
 
-  // 3. Create Root Chart Window Group
+  // 2. Create Root Chart Window Group
   const chartWin = new THREE.Group();
   chartWin.userData.ticker = ticker;
-  chartWin.userData.slotIndex = targetSlot;
   chartWin.userData.isChartWindow = true;
   chartWin.userData.displayMode = 'candles';
   chartWin.userData.activePresetId = '1M_30m';
 
-  // 4. Arc Positioning around user gaze
-  const slotYawAngles = [0, 0.46, -0.46]; // Center (0), Right (~26 deg), Left (~-26 deg)
-  const yaw = slotYawAngles[targetSlot] || 0;
-
-  const gaze = new THREE.Vector3();
-  if (targetCam.getWorldDirection) {
-    targetCam.getWorldDirection(gaze);
-  } else if (targetCam.quaternion) {
-    gaze.set(0, 0, -1).applyQuaternion(targetCam.quaternion);
-  } else {
-    gaze.set(0, 0, -1);
-  }
-  gaze.y = 0;
-  if (gaze.lengthSq() < 0.001) gaze.set(0, 0, -1);
-  gaze.normalize();
-
-  const spawnVector = gaze.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
-  if (targetCam.position) {
-    chartWin.position.copy(targetCam.position).add(spawnVector.multiplyScalar(1.25));
-    chartWin.position.y = (targetCam.position.y || 1.45) + 0.05;
-  } else {
-    chartWin.position.set(0, 1.5, -1.25);
-  }
-
-  if (targetCam.quaternion) {
-    chartWin.quaternion.copy(targetCam.quaternion);
-  }
-  if (yaw !== 0) {
-    chartWin.rotateY(-yaw * 0.75); // Angle inward toward the viewer
-  }
-
   // =========================================================================
-  // 5. Optical Frosted Glass Slate Base Plate (z = 0.0m) - Spatial HUD Glass
+  // 3. Optical Frosted Glass Slate Base Plate (z = 0.0m) - Spatial HUD Glass
   // =========================================================================
   const bgGeo = new THREE.PlaneGeometry(1.32, 0.82);
-  const slateMat = new THREE.MeshPhysicalMaterial({
-    color: 0x030712,
+  const slateMat = new THREE.MeshStandardMaterial({
+    color: 0x040914,
+    roughness: 0.2,
+    metalness: 0.3,
     transparent: true,
-    opacity: 0.90,
-    roughness: 0.15,
-    metalness: 0.1,
-    transmission: 0.2, // Gives realistic optical glass depth in XR
-    ior: 1.4,
+    opacity: 0.92,
     side: THREE.DoubleSide
   });
   const bgMesh = new THREE.Mesh(bgGeo, slateMat);
@@ -861,43 +1203,46 @@ export function openOrFocusChart(ticker, assetData = {}, camera = null, scene = 
   chartWin.add(borderLines);
   chartWin.userData.borderLines = borderLines;
 
-  // Dedicated Soft Holographic Terminal Lighting inside chartWin (Zero harsh glare)
-  // 1. Gentle ambient fill light for 3D candles and volume pillars
-  const holoFillLight = new THREE.AmbientLight(0xffffff, 0.50);
-  chartWin.add(holoFillLight);
+  // 3b. Decorative Sci-Fi Spatial HUD Window Chrome
+  addSpatialWindowChrome(chartWin);
 
-  // 2. Soft cyan rim directional light for 3D depth without center hotspot
-  const holoRimLight = new THREE.DirectionalLight(0x06b6d4, 0.40);
-  holoRimLight.position.set(0.65, 0.80, 0.60);
-  chartWin.add(holoRimLight);
+  // NOTE: Dedicated lights (AmbientLight/DirectionalLight) were REMOVED from chartWin.
+  // Adding dynamic lights to the scene graph forces WebGL to recompile shaders for
+  // all materials across the entire scene (planets, star, accretion disk, bloom),
+  // causing a massive 1-3s multi-frame freeze.
 
-  // 6. Header Section (Top-Left)
-  buildHeader(chartWin, ticker, assetData);
-
-  // 7. Top-Right Mode Toggles & Close Button
-  buildTopControls(chartWin, targetScene);
-
-  // 7b. Golden Dollar Badge Wolf of Wall Street Easter Egg
-  attachWolfEggButton(chartWin);
-
-  // 8. 3D Candlesticks, Volumes & Right Price Axis
-  let rawNumeric = assetData.priceNumeric;
-  if (!rawNumeric && assetData.price) {
-    const cleaned = String(assetData.price).replace(/[^0-9.-]+/g, '');
-    rawNumeric = parseFloat(cleaned);
-  }
-  const basePrice = (rawNumeric && !isNaN(rawNumeric)) ? rawNumeric : 140;
+  // 4. 3D Candlesticks, Volumes & Right Price Axis
   chartWin.userData.basePrice = basePrice;
   chartWin.userData.currency = String(assetData.price || '').startsWith('₹') ? '₹' : '$';
   renderChartDataContent(chartWin, basePrice, 0.035, 20);
+  console.timeEnd('[Chart Open] 2. Geometry & Mesh construction');
+
+  console.time('[Chart Open] 3. Text & Canvas texture rasterization');
+  // 5. Header Section (Top-Left)
+  buildHeader(chartWin, ticker, assetData);
+
+  // 6. Top-Right Mode Toggles & Close Button
+  buildTopControls(chartWin, targetScene);
+
+  // 7. Golden Dollar Badge Wolf of Wall Street Easter Egg
+  attachWolfEggButton(chartWin);
+
+  // 8. Dynamic Floating Macro Stress-Test Alert Banner
+  buildStressAlertBanner(chartWin, assetData);
 
   // 9. Bottom Resolution & Timeframe Pills
   buildTimeframePills(chartWin, '1M_30m');
+  console.timeEnd('[Chart Open] 3. Text & Canvas texture rasterization');
 
   targetScene.add(chartWin);
   activeChartWindows.push(chartWin);
+
+  // 10. Position all open charts in ergonomic radial cockpit arc
+  updateAllChartSlots(targetCam);
+
   soundFx.playSelectSound();
-  console.log(`[Charts] Spawning rich 3D chart window #${activeChartWindows.length} for ${ticker} in slot ${targetSlot}`);
+  console.log(`[Charts] Spawning rich 3D chart window #${activeChartWindows.length} for ${ticker} in slot ${chartWin.userData.slotIndex}`);
+  console.timeEnd(`[Chart Open] Total time for ${ticker}`);
   return chartWin;
 }
 
@@ -923,6 +1268,10 @@ export function closeChartWindow(chartWin, scene = null) {
   const idx = activeChartWindows.indexOf(chartWin);
   if (idx !== -1) activeChartWindows.splice(idx, 1);
 
+  if (activeHoveredCandle && (activeHoveredCandle.userData?.parentChart === chartWin || activeHoveredCandle.userData?.parentWindow === chartWin)) {
+    clearCandleHover();
+  }
+
   soundFx.playCloseSound();
 
   // Remove from 3D scene
@@ -931,12 +1280,30 @@ export function closeChartWindow(chartWin, scene = null) {
   else if (targetScene) targetScene.remove(chartWin);
 
   chartWin.traverse((child) => {
-    if (child.geometry) child.geometry.dispose();
+    if (child.geometry && !child.geometry.userData?.isShared) {
+      child.geometry.dispose();
+    }
     if (child.material) {
-      if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
-      else child.material.dispose();
+      if (Array.isArray(child.material)) {
+        child.material.forEach((m) => {
+          if (!m.userData?.isShared) {
+            if (m.map && !m.map.userData?.isShared) m.map.dispose();
+            m.dispose();
+          }
+        });
+      } else if (!child.material.userData?.isShared) {
+        if (child.material.map && !child.material.map.userData?.isShared) {
+          child.material.map.dispose();
+        }
+        child.material.dispose();
+      }
     }
   });
+
+  const activeCam = typeof window !== 'undefined' ? window.camera : null;
+  if (activeCam) {
+    updateAllChartSlots(activeCam);
+  }
 
   console.log(`[Charts] Closed chart window. Remaining: ${activeChartWindows.length}`);
 }
@@ -972,30 +1339,10 @@ export function setChartDisplayMode(mode = 'candles', targetChartWin = null) {
 
   // Update In-Scene 3D Buttons
   if (chartWin.userData.btnSpline && chartWin.userData.btnCandles) {
-    const updateBtn = (mesh, textStr, isActive) => {
-      const canvas = document.createElement('canvas');
-      canvas.width = 270; canvas.height = 80;
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = isActive ? '#06b6d4' : '#111c30';
-      ctx.roundRect(4, 4, 262, 72, 14);
-      ctx.fill();
-      ctx.strokeStyle = isActive ? '#38bdf8' : '#334155';
-      ctx.lineWidth = 3;
-      ctx.roundRect(4, 4, 262, 72, 14);
-      ctx.stroke();
-      ctx.fillStyle = isActive ? '#ffffff' : '#94a3b8';
-      ctx.font = 'bold 26px "Inter", "Segoe UI", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(textStr, 135, 40);
-
-      if (mesh.material?.map) mesh.material.map.dispose();
-      mesh.material.map = new THREE.CanvasTexture(canvas);
-      mesh.material.needsUpdate = true;
-    };
-
-    updateBtn(chartWin.userData.btnSpline, '📈 SPLINE', normMode === 'spline');
-    updateBtn(chartWin.userData.btnCandles, '📊 CANDLES', isCandle);
+    chartWin.userData.btnSpline.material.map = getSplineBtnTexture(normMode === 'spline');
+    chartWin.userData.btnSpline.material.needsUpdate = true;
+    chartWin.userData.btnCandles.material.map = getCandlesBtnTexture(isCandle);
+    chartWin.userData.btnCandles.material.needsUpdate = true;
   }
 
   // Update 2D DOM segmented controls if present
@@ -1024,32 +1371,13 @@ export function setChartResolutionPreset(presetId, scene = null, targetChartWin 
   if (chartWin.userData.timeframePills) {
     chartWin.userData.timeframePills.forEach(({ mesh, preset: p }) => {
       const isActive = p.id === preset.id || p.label === preset.label;
-      const canvas = document.createElement('canvas');
-      canvas.width = 256; canvas.height = 84;
-      const ctx = canvas.getContext('2d');
-
-      ctx.fillStyle = isActive ? '#06b6d4' : '#111c30';
-      ctx.roundRect(4, 4, 248, 76, 14);
-      ctx.fill();
-
-      ctx.strokeStyle = isActive ? '#38bdf8' : '#334155';
-      ctx.lineWidth = 3;
-      ctx.roundRect(4, 4, 248, 76, 14);
-      ctx.stroke();
-
-      ctx.fillStyle = isActive ? '#ffffff' : '#94a3b8';
-      ctx.font = 'bold 27px "Inter", "Segoe UI", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(p.label, 128, 42);
-
-      if (mesh.material?.map) mesh.material.map.dispose();
-      mesh.material.map = new THREE.CanvasTexture(canvas);
+      mesh.material.map = getTimeframePillTexture(p.label, isActive);
       mesh.material.needsUpdate = true;
     });
   }
 
   // 2. Regenerate 3D Candlesticks & Spline for this resolution
+  clearCandleHover();
   const basePrice = chartWin.userData.basePrice || 140;
   renderChartDataContent(chartWin, basePrice, preset.mult, preset.count);
 
@@ -1070,31 +1398,27 @@ let activeHoveredCandle = null;
 export function updateCandleHover(hitCandle) {
   if (activeHoveredCandle === hitCandle) return;
 
-  // Reset previous candle
+  // Reset previous candle back to its exact baseScale
   if (activeHoveredCandle) {
-    if (activeHoveredCandle.material?.color && activeHoveredCandle.userData?.originalColor !== undefined) {
-      activeHoveredCandle.material.color.setHex(activeHoveredCandle.userData.originalColor);
-      if (activeHoveredCandle.material.emissive) {
-        const origIsGreen = activeHoveredCandle.userData.candleData?.close >= activeHoveredCandle.userData.candleData?.open;
-        activeHoveredCandle.material.emissive.setHex(origIsGreen ? 0x065f46 : 0x991b1b);
-        activeHoveredCandle.material.emissiveIntensity = 0.35;
-      }
+    const prevIsGreen = activeHoveredCandle.userData.isGreen;
+    activeHoveredCandle.material = prevIsGreen ? sharedGreenCandleMat : sharedRedCandleMat;
+    if (activeHoveredCandle.userData?.baseScale) {
+      activeHoveredCandle.scale.copy(activeHoveredCandle.userData.baseScale);
     }
-    activeHoveredCandle.scale.set(1.0, 1.0, 1.0);
   }
 
   activeHoveredCandle = hitCandle;
   if (!hitCandle) return;
 
-  // Highlight hovered candle
-  if (hitCandle.material?.color) {
-    hitCandle.material.color.setHex(0x38bdf8); // Bright electric cyan
-    if (hitCandle.material.emissive) {
-      hitCandle.material.emissive.setHex(0x0284c7);
-      hitCandle.material.emissiveIntensity = 0.85;
-    }
+  // Highlight hovered candle: scale up proportionally from its stored baseScale
+  hitCandle.material = hoveredCandleMat;
+  if (hitCandle.userData?.baseScale) {
+    hitCandle.scale.set(
+      hitCandle.userData.baseScale.x * 1.18,
+      hitCandle.userData.baseScale.y * 1.06,
+      hitCandle.userData.baseScale.z * 1.18
+    );
   }
-  hitCandle.scale.set(1.15, 1.05, 1.15);
 
   // Update Tooltip Pill text
   const chartWin = hitCandle.userData.parentChart || hitCandle.userData.parentWindow;
@@ -1132,15 +1456,11 @@ export function updateCandleHover(hitCandle) {
 
 export function clearCandleHover() {
   if (activeHoveredCandle) {
-    if (activeHoveredCandle.material?.color && activeHoveredCandle.userData?.originalColor !== undefined) {
-      activeHoveredCandle.material.color.setHex(activeHoveredCandle.userData.originalColor);
-      if (activeHoveredCandle.material.emissive) {
-        const origIsGreen = activeHoveredCandle.userData.candleData?.close >= activeHoveredCandle.userData.candleData?.open;
-        activeHoveredCandle.material.emissive.setHex(origIsGreen ? 0x065f46 : 0x991b1b);
-        activeHoveredCandle.material.emissiveIntensity = 0.35;
-      }
+    const prevIsGreen = activeHoveredCandle.userData.isGreen;
+    activeHoveredCandle.material = prevIsGreen ? sharedGreenCandleMat : sharedRedCandleMat;
+    if (activeHoveredCandle.userData?.baseScale) {
+      activeHoveredCandle.scale.copy(activeHoveredCandle.userData.baseScale);
     }
-    activeHoveredCandle.scale.set(1.0, 1.0, 1.0);
     const chartWin = activeHoveredCandle.userData.parentChart || activeHoveredCandle.userData.parentWindow;
     if (chartWin?.userData?.tooltipMesh) {
       chartWin.userData.tooltipMesh.visible = false;
@@ -1325,22 +1645,21 @@ export function safePlayChestThump() {
 export function playChestThump() {
   try {
     if (typeof window === 'undefined') return;
-    if (!audioCtx) {
-      const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
-      if (!AudioCtxClass) return;
-      audioCtx = new AudioCtxClass();
-    }
-    if (audioCtx.state === 'suspended') {
-      audioCtx.resume().catch(() => {});
+    const ctx = (typeof window.getOrCreateAudioContext === 'function')
+      ? window.getOrCreateAudioContext()
+      : (window.sharedAudioContext || (audioCtx || (audioCtx = new (window.AudioContext || window.webkitAudioContext)())));
+    if (!ctx) return;
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
     }
 
-    const now = audioCtx.currentTime;
+    const now = ctx.currentTime;
 
     // Rhythmic pattern: Thump, Thump, Hummm...
     const beats = [0.0, 0.28, 0.65];
     beats.forEach((timeOffset, idx) => {
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
 
       if (idx < 2) {
         // Deep chest thumps (75Hz -> 28Hz drop)
@@ -1361,7 +1680,7 @@ export function playChestThump() {
       }
 
       osc.connect(gain);
-      gain.connect(audioCtx.destination);
+      gain.connect(ctx.destination);
 
       osc.start(now + timeOffset);
       osc.stop(now + timeOffset + (idx < 2 ? 0.2 : 1.25));
@@ -1371,8 +1690,86 @@ export function playChestThump() {
   }
 }
 
+export function playSynthesizedVocalQuote(ctx) {
+  if (!ctx) return;
+  try {
+    const startTime = ctx.currentTime + 0.55;
+
+    // Formant vocalization sequence for:
+    // "Fugayzi, fugazi. It's a whazy. It's a woozie. It's fairy dust."
+    const syllables = [
+      { t: 0.00, dur: 0.16, pitch: 130, f1: 350, f2: 900 },   // Fu-
+      { t: 0.18, dur: 0.22, pitch: 165, f1: 530, f2: 1850 },  // gay-
+      { t: 0.42, dur: 0.26, pitch: 140, f1: 270, f2: 2300 },  // zi,
+      { t: 0.78, dur: 0.16, pitch: 130, f1: 350, f2: 900 },   // fu-
+      { t: 0.96, dur: 0.22, pitch: 155, f1: 720, f2: 1150 },  // ga-
+      { t: 1.20, dur: 0.28, pitch: 120, f1: 270, f2: 2300 },  // zi.
+      { t: 1.60, dur: 0.14, pitch: 140, f1: 450, f2: 1100 },  // It's
+      { t: 1.76, dur: 0.12, pitch: 135, f1: 650, f2: 1700 },  // a
+      { t: 1.90, dur: 0.22, pitch: 160, f1: 550, f2: 1450 },  // wha-
+      { t: 2.14, dur: 0.26, pitch: 130, f1: 270, f2: 2300 },  // zy.
+      { t: 2.50, dur: 0.14, pitch: 140, f1: 450, f2: 1100 },  // It's
+      { t: 2.66, dur: 0.12, pitch: 135, f1: 650, f2: 1700 },  // a
+      { t: 2.80, dur: 0.24, pitch: 168, f1: 320, f2: 850 },   // woo-
+      { t: 3.06, dur: 0.28, pitch: 125, f1: 270, f2: 2300 },  // zie.
+      { t: 3.44, dur: 0.14, pitch: 135, f1: 450, f2: 1100 },  // It's
+      { t: 3.60, dur: 0.24, pitch: 175, f1: 550, f2: 1850 },  // fai-
+      { t: 3.86, dur: 0.16, pitch: 150, f1: 400, f2: 1600 },  // ry
+      { t: 4.04, dur: 0.45, pitch: 115, f1: 500, f2: 1100 }   // dust.
+    ];
+
+    syllables.forEach(({ t, dur, pitch, f1, f2 }) => {
+      const sylTime = startTime + t;
+
+      const osc = ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(pitch, sylTime);
+      osc.frequency.exponentialRampToValueAtTime(pitch * 0.94, sylTime + dur);
+
+      const f1Filter = ctx.createBiquadFilter();
+      f1Filter.type = 'bandpass';
+      f1Filter.frequency.setValueAtTime(f1, sylTime);
+      f1Filter.Q.setValueAtTime(5.0, sylTime);
+
+      const f2Filter = ctx.createBiquadFilter();
+      f2Filter.type = 'bandpass';
+      f2Filter.frequency.setValueAtTime(f2, sylTime);
+      f2Filter.Q.setValueAtTime(6.0, sylTime);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, sylTime);
+      gain.gain.linearRampToValueAtTime(0.16, sylTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, sylTime + dur);
+
+      osc.connect(f1Filter);
+      osc.connect(f2Filter);
+      f1Filter.connect(gain);
+      f2Filter.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(sylTime);
+      osc.stop(sylTime + dur + 0.02);
+    });
+  } catch (err) {
+    console.warn('[Wolf Egg] Formant voice synth error:', err);
+  }
+}
+
 export function speakWolfQuote() {
   try {
+    const ctx = (typeof window !== 'undefined' && typeof window.getOrCreateAudioContext === 'function')
+      ? window.getOrCreateAudioContext()
+      : (typeof window !== 'undefined' && window.sharedAudioContext ? window.sharedAudioContext : null);
+
+    // 1. Web Audio Formant Voice Synthesis (Guaranteed audible inside Meta Quest WebXR)
+    if (ctx) {
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+      playSynthesizedVocalQuote(ctx);
+    }
+
+    // 2. Desktop Browser SpeechSynthesis (where native TTS is available)
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel(); // Stop any pending speech
       const utterance = new SpeechSynthesisUtterance(
@@ -1594,4 +1991,31 @@ export function render3DCandlestickChart(symbol, asset, camera, scene) {
 export function updateActiveChart(camera = null, delta = 0.016) {
   // Update line resolution or billboard orientation if needed
   TWEEN.update();
+}
+
+// ============================================================================
+// Macro Stress-Test / Risk Simulation Multi-Chart Synchronizer
+// ============================================================================
+export function updateAllChartsStressState(isActive) {
+  activeChartWindows.forEach((win) => {
+    if (win.userData?.redrawStressButton) {
+      win.userData.redrawStressButton(isActive);
+    }
+    if (win.userData?.redrawStressBanner) {
+      win.userData.redrawStressBanner(isActive);
+    }
+    if (win.userData?.basePrice) {
+      const activePreset =
+        RESOLUTION_PRESETS.find((p) => p.id === (win.userData?.currentPresetId || '1M_30m')) ||
+        RESOLUTION_PRESETS[2];
+      renderChartDataContent(win, win.userData.basePrice, activePreset.mult, activePreset.count);
+    }
+  });
+}
+
+// Auto-sync whenever macro stress test status changes
+if (typeof onStressTestChange === 'function') {
+  onStressTestChange((isActive) => {
+    updateAllChartsStressState(isActive);
+  });
 }

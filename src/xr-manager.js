@@ -30,6 +30,12 @@ import {
   handleTitleBarClick
 } from './charts.js';
 import {
+  triggerMacroStressTest,
+  isStressTestActive,
+  tickStressTest,
+  onStressTestChange
+} from './solar-system.js';
+import {
   setPassthroughMode,
   tabletopPivot,
   baseRingMesh,
@@ -56,6 +62,37 @@ let activeXRManagerInstance = null;
 
 export function getActiveXRManager() {
   return activeXRManagerInstance;
+}
+
+// ============================================================================
+// Global WebXR AudioContext Unlocker for Meta Quest & Immersive Runtimes
+// ============================================================================
+export let sharedAudioContext = null;
+
+export function getOrCreateAudioContext() {
+  if (!sharedAudioContext) {
+    const AudioContextClass = typeof window !== 'undefined'
+      ? (window.AudioContext || window.webkitAudioContext)
+      : null;
+    if (AudioContextClass) {
+      sharedAudioContext = new AudioContextClass();
+      if (typeof window !== 'undefined') {
+        window.sharedAudioContext = sharedAudioContext;
+      }
+    }
+  }
+  if (sharedAudioContext && sharedAudioContext.state === 'suspended') {
+    sharedAudioContext.resume().then(() => {
+      console.log('[Quest Audio] AudioContext successfully resumed in WebXR session.');
+    }).catch(err => {
+      console.warn('[Quest Audio] AudioContext resume failed:', err);
+    });
+  }
+  return sharedAudioContext;
+}
+
+if (typeof window !== 'undefined') {
+  window.getOrCreateAudioContext = getOrCreateAudioContext;
 }
 
 // ============================================================================
@@ -270,6 +307,7 @@ export function setupXRControllers(renderer) {
     });
 
     controller.addEventListener('squeezestart', () => {
+      getOrCreateAudioContext();
       handleSqueezeChange(controller, true);
     });
 
@@ -278,6 +316,7 @@ export function setupXRControllers(renderer) {
     });
 
     controller.addEventListener('select', () => {
+      getOrCreateAudioContext();
       handleControllerSelect(controller);
     });
   }
@@ -287,6 +326,7 @@ export function setupXRControllers(renderer) {
  * Robust Controller Raycast Click Detection with Recursive Parent Search & Fallback.
  */
 export function handleControllerSelect(controller) {
+  getOrCreateAudioContext();
   if (!controller) return;
   const manager = activeXRManagerInstance;
   const scene = manager?.scene || (typeof window !== 'undefined' ? window.scene : null);
@@ -424,9 +464,10 @@ export function handleControllerSelect(controller) {
               currency: node.userData.currency || 'USD',
               category: node.userData.category || 'Core Equity'
             };
-            openOrFocusChart(ticker, assetData, camera, scene);
             if (manager?.callbacks?.onSelectNode) {
               manager.callbacks.onSelectNode(assetData, node);
+            } else {
+              openOrFocusChart(ticker, assetData, camera, scene);
             }
             return;
           }
@@ -708,6 +749,12 @@ export class XRManager {
     this.suggestionsContainer = null;
     this.cursorVisible = true;
     this.cursorTimer = 0;
+    this.stressRumbleTimer = 0;
+
+    // Synchronize Left-Wrist HUD with Macro Stress-Test simulation
+    if (typeof onStressTestChange === 'function') {
+      onStressTestChange((isActive) => this.updateStressStatus(isActive));
+    }
 
     this.initXR();
   }
@@ -1290,10 +1337,19 @@ export class XRManager {
         }
       });
 
-      controller.addEventListener('selectstart', (e) => this.onSelectStart(e, controller));
+      controller.addEventListener('selectstart', (e) => {
+        getOrCreateAudioContext();
+        this.onSelectStart(e, controller);
+      });
       controller.addEventListener('selectend', (e) => this.onSelectEnd(e, controller));
-      controller.addEventListener('select', (e) => this.onSelect(e, controller));
-      controller.addEventListener('squeeze', (e) => this.onSqueeze(e, controller));
+      controller.addEventListener('select', (e) => {
+        getOrCreateAudioContext();
+        this.onSelect(e, controller);
+      });
+      controller.addEventListener('squeeze', (e) => {
+        getOrCreateAudioContext();
+        this.onSqueeze(e, controller);
+      });
       this.userRig.add(controller);
       this.controllers.push(controller);
 
@@ -1337,7 +1393,10 @@ export class XRManager {
       this.hands.push(hand);
 
       // Pinch Event Listeners
-      hand.addEventListener('pinchstart', (e) => this.onHandPinchStart(e, hand));
+      hand.addEventListener('pinchstart', (e) => {
+        getOrCreateAudioContext();
+        this.onHandPinchStart(e, hand);
+      });
       hand.addEventListener('pinchend', (e) => this.onHandPinchEnd(e, hand));
 
       // Hand Pointer & Reticle (Index fingertip laser pointer for air-pointing)
@@ -1775,14 +1834,14 @@ export class XRManager {
     this.dockTexts.btnModeMR = btnModeMR.txt;
     this.dockButtons.btnModeMR = btnModeMR.btnMesh;
 
-    // 5. Row 2: Chart, Ticker Search & Data Tools (y = +0.005m | 5 buttons)
+    // 5. Row 2: Chart, Ticker Search, Macro Stress Risk Simulation & Data Tools (y = +0.005m | 6 buttons)
     const btnChartMode = createPillButton({
-      label: '📈/📊 Mode',
-      x: -0.090,
+      label: '📈 Mode',
+      x: -0.095,
       y: 0.005,
-      w: 0.046,
+      w: 0.036,
       h: 0.018,
-      fontSize: 0.0050,
+      fontSize: 0.0048,
       color: 0x0e7490,
       hoverColor: 0x06b6d4,
       emissiveColor: 0x06b6d4,
@@ -1794,11 +1853,11 @@ export class XRManager {
 
     const btnToggleChart = createPillButton({
       label: '📊 Chart',
-      x: -0.044,
+      x: -0.057,
       y: 0.005,
-      w: 0.042,
+      w: 0.036,
       h: 0.018,
-      fontSize: 0.0056,
+      fontSize: 0.0050,
       color: 0x1e293b,
       hoverColor: 0x334155,
       action: 'toggleChart'
@@ -1807,11 +1866,11 @@ export class XRManager {
 
     const btnQuickTickers = createPillButton({
       label: '🔍 Search',
-      x: 0.000,
+      x: -0.019,
       y: 0.005,
-      w: 0.042,
+      w: 0.036,
       h: 0.018,
-      fontSize: 0.0056,
+      fontSize: 0.0050,
       color: 0x0f766e,
       hoverColor: 0x14b8a6,
       emissiveColor: 0x10b981,
@@ -1821,13 +1880,34 @@ export class XRManager {
     this.dockTexts.btnQuickTickers = btnQuickTickers.txt;
     this.dockButtons.btnQuickTickers = btnQuickTickers.btnMesh;
 
+    // Macro Stress-Test (Black Hole Collapse) Risk Simulation Button
+    const btnStress = createPillButton({
+      label: '🕳️ Stress',
+      x: 0.019,
+      y: 0.005,
+      w: 0.036,
+      h: 0.018,
+      fontSize: 0.0048,
+      color: 0x1e293b,
+      hoverColor: 0x7c2d12,
+      activeColor: 0xdc2626,
+      emissiveColor: 0x9a3412,
+      emissiveIntensity: 0.2,
+      borderColor: 0xf59e0b,
+      borderOpacity: 0.7,
+      textColor: 0xfcd34d,
+      action: 'toggleStressTest'
+    });
+    this.dockTexts.btnStress = btnStress.txt;
+    this.dockButtons.btnStress = btnStress.btnMesh;
+
     const btnManageData = createPillButton({
       label: '📑 Data',
-      x: 0.044,
+      x: 0.057,
       y: 0.005,
-      w: 0.042,
+      w: 0.036,
       h: 0.018,
-      fontSize: 0.0056,
+      fontSize: 0.0050,
       color: 0x1e293b,
       hoverColor: 0x334155,
       action: 'toggleManageData'
@@ -1836,11 +1916,11 @@ export class XRManager {
 
     const btnReset = createPillButton({
       label: '🔄 Reset',
-      x: 0.090,
+      x: 0.095,
       y: 0.005,
-      w: 0.044,
+      w: 0.036,
       h: 0.018,
-      fontSize: 0.0056,
+      fontSize: 0.0050,
       color: 0x6d28d9,
       hoverColor: 0x8b5cf6,
       emissiveColor: 0x7c3aed,
@@ -3735,15 +3815,45 @@ export class XRManager {
   }
 
   /**
+   * Synchronizes Active Macro Stress-Test (Black Hole Collapse) State on the Wrist Dock.
+   */
+  updateStressStatus(isActive) {
+    const btn = this.dockButtons?.btnStress;
+    if (btn) {
+      const activeCol = 0xdc2626;
+      const activeEmiss = 0xef4444;
+      const activeBorder = 0xf87171;
+
+      if (btn.material?.color) btn.material.color.setHex(isActive ? activeCol : 0x1e293b);
+      if (btn.material?.emissive) {
+        btn.material.emissive.setHex(isActive ? activeEmiss : 0x9a3412);
+        btn.material.emissiveIntensity = isActive ? 0.65 : 0.20;
+      }
+
+      if (btn.userData?.borderMesh?.material) {
+        btn.userData.borderMesh.material.color.setHex(isActive ? activeBorder : 0xf59e0b);
+        btn.userData.borderMesh.material.opacity = isActive ? 1.0 : 0.70;
+      }
+      if (this.dockTexts?.btnStress) {
+        this.dockTexts.btnStress.text = isActive ? '🕳️ Shock' : '🕳️ Stress';
+        this.dockTexts.btnStress.color = isActive ? 0xffffff : 0xfcd34d;
+        this.dockTexts.btnStress.sync();
+      }
+    }
+  }
+
+  /**
    * Controller Raycast Select Trigger (6-DoF Controller).
    */
   onSelect(event, controller) {
+    getOrCreateAudioContext();
     if (this.isDraggingTabletop) return;
     this.triggerHaptic(controller, 0.45, 50);
     handleControllerSelect(controller);
   }
 
   onSelectStart(event, controller) {
+    getOrCreateAudioContext();
     if (controller.userData.laser) {
       controller.userData.laser.material.color.setHex(0x8b5cf6);
       controller.userData.laser.material.opacity = 0.95;
@@ -4042,6 +4152,10 @@ export class XRManager {
       this.callbacks.onToggleChart();
     } else if (action === 'toggleManageData' && this.callbacks.onToggleManageData) {
       this.callbacks.onToggleManageData();
+    } else if (action === 'toggleStressTest') {
+      const activeCtrl = this.controllers?.[0] || null;
+      triggerMacroStressTest(!isStressTestActive, activeCtrl);
+      this.updateStressStatus(isStressTestActive);
     } else if (action === 'closeDataPanel') {
       this.toggleSpatialDataPanel(false);
     } else if (action === 'toggleQuickTickers') {
@@ -4203,6 +4317,12 @@ export class XRManager {
           triggerWolfEasterEgg(parentWin, controller);
           return;
         }
+        if (hit.userData?.isStressButton || hit.userData?.action === 'toggleStressTest') {
+          this.animateButtonPress(hit);
+          triggerMacroStressTest(!isStressTestActive, controller);
+          this.updateStressStatus(isStressTestActive);
+          return;
+        }
         if (hit.userData?.isTitleBar) {
           const parentWin = hit.userData.parentWindow || hit.parent;
           if (parentWin) handleTitleBarClick(parentWin);
@@ -4226,6 +4346,13 @@ export class XRManager {
           while (node && !node.userData?.isAssetNode && !node.userData?.ticker && !node.userData?.symbol && node !== solarGroup && node.parent) {
             node = node.parent;
           }
+          if (node && (node.userData?.isCentralStar || node.name === 'CentralMacroStarMesh' || node.name === 'CentralMacroStarGroup' || node.name === 'AccretionDisk')) {
+            console.log('[WebXR] Ray selected Central Macro Benchmark Star / Black Hole');
+            triggerMacroStressTest(!isStressTestActive, controller);
+            this.updateStressStatus(isStressTestActive);
+            this.triggerClickHaptic(controller);
+            return;
+          }
           if (node && (node.userData?.isAssetNode || node.userData?.ticker || node.userData?.symbol)) {
             const ticker = node.userData.ticker || node.userData.symbol;
             if (ticker) {
@@ -4242,9 +4369,10 @@ export class XRManager {
               const activeCam = (this.renderer?.xr?.isPresenting && this.renderer?.xr?.getCamera)
                 ? this.renderer.xr.getCamera()
                 : this.camera;
-              openOrFocusChart(ticker, assetData, activeCam, this.scene);
               if (this.callbacks?.onSelectNode) {
                 this.callbacks.onSelectNode(assetData, node);
+              } else {
+                openOrFocusChart(ticker, assetData, activeCam, this.scene);
               }
               return;
             }
@@ -4664,12 +4792,17 @@ export class XRManager {
         if (candleHits.length > 0) {
           const hitCandle = candleHits[0].object;
           if (hitCandle.userData?.isCandle) {
+            if (controller.userData.lastHoveredCandle !== hitCandle) {
+              controller.userData.lastHoveredCandle = hitCandle;
+              this.triggerScrubberTickHaptic(controller);
+            }
             updateCandleHover(hitCandle);
-            this.triggerScrubberTickHaptic(controller);
             hoveredChartHitPoint = candleHits[0].point;
             hoveredChartSource = controller;
             hoveredChartWindow = hitCandle.userData.parentChart || hitCandle.userData.parentWindow;
           }
+        } else {
+          controller.userData.lastHoveredCandle = null;
         }
       }
 
@@ -4822,6 +4955,19 @@ export class XRManager {
       if (this.hoveredObject) setNodeHoverState(this.hoveredObject, false);
       if (anyHoveredPlanet) setNodeHoverState(anyHoveredPlanet, true);
       this.hoveredObject = anyHoveredPlanet;
+    }
+
+    // 7. Continuous Gravitational Sub-Bass Rumble on Quest during Macro Stress Test
+    if (isStressTestActive) {
+      this.stressRumbleTimer = (this.stressRumbleTimer || 0) + delta;
+      if (this.stressRumbleTimer >= 0.38) {
+        this.stressRumbleTimer = 0;
+        if (this.controllers && this.controllers.length > 0) {
+          this.controllers.forEach((ctrl) => {
+            this.triggerHaptic(ctrl, 0.50, 140);
+          });
+        }
+      }
     }
   }
 }
